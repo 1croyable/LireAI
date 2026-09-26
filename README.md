@@ -4,6 +4,12 @@ LireAI is a standalone EPUB reader for iPhone with AI-assisted reading features.
 
 The app does **not** depend on a developer-operated backend or account system. Books, reading progress, and local caches stay on the device. AI features use the user's own Mistral API key and communicate directly with the Mistral API.
 
+<p align="center">
+  <img src="Imgs/reading_page.jpg" alt="EPUB reading view" width="45%" />
+  &nbsp;&nbsp;
+  <img src="Imgs/word_search.jpg" alt="AI lookup view" width="45%" />
+</p>
+
 ## Features
 
 - EPUB reading with Readium
