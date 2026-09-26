@@ -4,114 +4,246 @@ import Combine
 private enum MessageRole { case user, assistant }
 
 private struct ChatMessage: Identifiable {
-    let id = UUID()
+    let id: UUID
     let role: MessageRole
     let text: String?
-    let result: LireResult?
+    var result: LireResult?
+    var progressText: String?
+    var errorText: String?
 }
 
-/// One transient lookup conversation. It deliberately lives outside the panel
-/// view so collapsing the panel does not destroy context. Starting a new lookup
-/// replaces this object and releases the previous messages/history immediately.
+/// Keeps one lookup conversation alive while its panel is closed.
 @MainActor
 final class AIReadingConversation: ObservableObject, Identifiable {
+    private struct RequestSpec {
+        let sequence: Int
+        let question: String?
+        let nextSource: LireSource?
+        let historyUser: String
+        let progressText: String
+    }
+
+    private struct CompletedTurn {
+        let sequence: Int
+        let user: String
+        let assistant: String
+    }
+
     let id = UUID()
     let source: String
     let sourceFragments: [String]?
+    let bookContext: String
 
     @Published fileprivate var messages: [ChatMessage] = []
-    @Published fileprivate var retryQuestion: String?
     @Published var question = ""
-    @Published var loading = false
-    @Published var error: String?
     @Published var sourceExpanded = false
+    @Published private(set) var activeRequestCount = 0
+    @Published private(set) var activeSearchRequestCount = 0
+    @Published private(set) var hasUnreadSearchResult = false
 
-    private var history: [(String, String)] = []
-    private var requestTask: Task<Void, Never>?
+    private var completedTurns: [UUID: CompletedTurn] = [:]
+    private var requestTasks: [UUID: Task<Void, Never>] = [:]
+    private var activeSearchRequestIDs: Set<UUID> = []
+    private var failedRequests: [UUID: RequestSpec] = [:]
+    private var nextSequence = 0
     private var started = false
+    private var visible = false
 
-    init(fragments: [String]) {
+    var loading: Bool { activeRequestCount > 0 }
+    var hasCompletedAnswer: Bool { !completedTurns.isEmpty }
+    var shouldContinueForLookup: Bool { activeSearchRequestCount > 0 || hasUnreadSearchResult }
+
+    init(fragments: [String], bookContext: String) {
         let clean = fragments
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         sourceFragments = clean.count > 1 ? clean : nil
         source = clean.joined(separator: " ")
+        self.bookContext = bookContext
     }
 
     func startIfNeeded() {
         guard !started, !source.isEmpty else { return }
         started = true
-        startRequest(nil)
+        launch(question: nil, nextSource: nil, displayText: nil)
     }
 
     func submitQuestion() {
         let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !loading, !messages.isEmpty else { return }
+        guard !text.isEmpty, !loading, hasCompletedAnswer else { return }
         question = ""
-        messages.append(ChatMessage(role: .user, text: text, result: nil))
-        startRequest(text)
+        launch(question: text, nextSource: nil, displayText: text)
     }
 
-    func retry() {
-        guard !loading else { return }
-        startRequest(retryQuestion)
+    func appendLookup(fragments: [String]) {
+        let selected = LireSource(text: fragments.joined(separator: " "), fragments: fragments)
+        guard !selected.text.isEmpty else { return }
+        launch(question: nil, nextSource: selected, displayText: selected.text)
+    }
+
+    func markVisible() {
+        visible = true
+        hasUnreadSearchResult = false
+    }
+
+    func markHidden() {
+        visible = false
     }
 
     func cancelOutstandingRequest() {
-        requestTask?.cancel()
-        requestTask = nil
-        loading = false
+        requestTasks.values.forEach { $0.cancel() }
+        requestTasks.removeAll()
+        activeSearchRequestIDs.removeAll()
+        activeRequestCount = 0
+        activeSearchRequestCount = 0
     }
 
-    private func startRequest(_ text: String?) {
-        requestTask?.cancel()
-        requestTask = Task { [weak self] in
+    func retry(_ requestID: UUID) {
+        guard let spec = failedRequests.removeValue(forKey: requestID) else { return }
+        updateMessage(requestID) {
+            $0.errorText = nil
+            $0.progressText = spec.progressText
+        }
+        startTask(requestID: requestID, spec: spec, history: historySnapshot(before: spec.sequence))
+    }
+
+    private func launch(question: String?, nextSource: LireSource?, displayText: String?) {
+        let requestID = UUID()
+        let sequence = nextSequence
+        nextSequence += 1
+
+        if let displayText {
+            messages.append(ChatMessage(
+                id: UUID(), role: .user, text: displayText,
+                result: nil, progressText: nil, errorText: nil
+            ))
+        }
+
+        let progress = question == nil ? "正在理解…" : "正在判断是否需要联网…"
+        let historyUser = nextSource?.prompt ?? question ?? ""
+        let spec = RequestSpec(
+            sequence: sequence,
+            question: question,
+            nextSource: nextSource,
+            historyUser: historyUser,
+            progressText: progress
+        )
+        messages.append(ChatMessage(
+            id: requestID, role: .assistant, text: nil,
+            result: nil, progressText: progress, errorText: nil
+        ))
+        startTask(requestID: requestID, spec: spec, history: historySnapshot(before: sequence))
+    }
+
+    private func startTask(
+        requestID: UUID,
+        spec: RequestSpec,
+        history: [(String, String)]
+    ) {
+        activeRequestCount += 1
+        requestTasks[requestID] = Task { [weak self] in
             guard let self else { return }
-            await send(text)
+            await send(requestID: requestID, spec: spec, history: history)
         }
     }
 
-    private func send(_ text: String?) async {
-        guard !loading else { return }
-
-        let clean = text?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if messages.isEmpty && clean != nil { return }
-        if !messages.isEmpty && (clean?.isEmpty ?? true) { return }
-
-        loading = true
-        error = nil
-        retryQuestion = clean
-
+    private func send(
+        requestID: UUID,
+        spec: RequestSpec,
+        history: [(String, String)]
+    ) async {
         do {
             let result = try await LireClient.answer(
                 source: source,
-                question: clean,
+                question: spec.question,
                 history: history,
-                fragments: sourceFragments
+                fragments: sourceFragments,
+                bookContext: bookContext,
+                nextSource: spec.nextSource,
+                progress: { [weak self] stage in
+                    self?.updateStage(stage, requestID: requestID)
+                }
             )
             guard !Task.isCancelled else {
-                loading = false
+                finish(requestID)
                 return
             }
 
-            if let clean {
-                history.append((clean, result.answer.plainText))
-            } else {
-                history.append(("", result.answer.plainText))
+            var contextParts = [result.answer.conversationText]
+            if !result.references.isEmpty {
+                let sources = result.references
+                    .map { "\($0.title): \($0.url.absoluteString)" }
+                    .joined(separator: "\n")
+                contextParts.append("Sources:\n\(sources)")
             }
-            messages.append(ChatMessage(role: .assistant, text: nil, result: result))
-            retryQuestion = nil
+            if result.searched {
+                contextParts.append("[This answer used web search.]")
+            }
+            let conversationText = contextParts.joined(separator: "\n")
+
+            completedTurns[requestID] = CompletedTurn(
+                sequence: spec.sequence,
+                user: spec.historyUser,
+                assistant: conversationText
+            )
+            updateMessage(requestID) {
+                $0.result = result
+                $0.progressText = nil
+                $0.errorText = nil
+            }
+            if result.searched, !visible {
+                hasUnreadSearchResult = true
+            }
         } catch is CancellationError {
         } catch {
             guard !Task.isCancelled else {
-                loading = false
+                finish(requestID)
                 return
             }
-            self.error = error.localizedDescription
+            failedRequests[requestID] = spec
+            updateMessage(requestID) {
+                $0.progressText = nil
+                $0.errorText = error.localizedDescription
+            }
         }
 
-        loading = false
-        requestTask = nil
+        finish(requestID)
+    }
+
+    private func historySnapshot(before sequence: Int) -> [(String, String)] {
+        completedTurns.values
+            .filter { $0.sequence < sequence }
+            .sorted { $0.sequence < $1.sequence }
+            .map { ($0.user, $0.assistant) }
+    }
+
+    private func updateMessage(_ id: UUID, change: (inout ChatMessage) -> Void) {
+        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        change(&messages[index])
+    }
+
+    private func updateStage(_ stage: LireRequestStage, requestID: UUID) {
+        let text: String
+        switch stage {
+        case .decidingSearch:
+            text = "正在判断是否需要联网…"
+        case .searchingWeb:
+            activeSearchRequestIDs.insert(requestID)
+            activeSearchRequestCount = activeSearchRequestIDs.count
+            text = "正在搜索网络…"
+        case .answering(let searched):
+            text = searched ? "正在整理搜索结果…" : "正在理解…"
+        }
+        updateMessage(requestID) { $0.progressText = text }
+    }
+
+    private func finish(_ requestID: UUID) {
+        if requestTasks.removeValue(forKey: requestID) != nil {
+            activeRequestCount = max(0, activeRequestCount - 1)
+        }
+        if activeSearchRequestIDs.remove(requestID) != nil {
+            activeSearchRequestCount = activeSearchRequestIDs.count
+        }
     }
 }
 
@@ -151,19 +283,11 @@ struct AIReadingSheet: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 15) {
-                    Text(conversation.source)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(conversation.sourceExpanded ? nil : 4)
-                        .textSelection(.enabled)
-
-                    if conversation.source.count > 140 {
-                        Button(conversation.sourceExpanded ? "收起原文" : "展开原文") {
-                            conversation.sourceExpanded.toggle()
-                            detent = .large
-                        }
-                        .font(.caption)
-                    }
+                    CollapsibleSourceText(
+                        text: conversation.source,
+                        expanded: $conversation.sourceExpanded,
+                        expandSheet: { detent = .large }
+                    )
 
                     Divider()
 
@@ -172,7 +296,7 @@ struct AIReadingSheet: View {
                             HStack {
                                 Spacer(minLength: 42)
                                 Text(text)
-                                    .font(.subheadline)
+                                    .font(.system(size: 17))
                                     .padding(.horizontal, 14)
                                     .padding(.vertical, 10)
                                     .background(Color.black.opacity(0.07), in: RoundedRectangle(cornerRadius: 17))
@@ -180,20 +304,15 @@ struct AIReadingSheet: View {
                         } else if let result = message.result {
                             answerView(result)
                             Divider()
-                        }
-                    }
-
-                    if conversation.loading {
-                        ProgressView("正在理解…")
-                    }
-
-                    if let error = conversation.error {
-                        Text(error)
-                            .font(.subheadline)
-                            .foregroundStyle(.red)
-
-                        Button("重试") {
-                            conversation.retry()
+                        } else if let progress = message.progressText {
+                            ProgressView(progress)
+                        } else if let error = message.errorText {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(error)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.red)
+                                Button("重试") { conversation.retry(message.id) }
+                            }
                         }
                     }
                 }
@@ -216,6 +335,7 @@ struct AIReadingSheet: View {
             HStack(spacing: 8) {
                 TextField("继续提问…", text: $conversation.question, axis: .vertical)
                     .lineLimit(1...2)
+                    .font(.system(size: 17))
                     .focused($typing)
                     .submitLabel(.send)
                     .padding(.horizontal, 12)
@@ -243,7 +363,7 @@ struct AIReadingSheet: View {
                 .disabled(
                     conversation.question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         || conversation.loading
-                        || conversation.messages.isEmpty
+                        || !conversation.hasCompletedAnswer
                 )
                 .accessibilityLabel("发送")
             }
@@ -256,7 +376,11 @@ struct AIReadingSheet: View {
         .presentationBackground(paper)
         .presentationDetents([.medium, .large], selection: $detent)
         .presentationDragIndicator(.visible)
-        .onAppear { conversation.startIfNeeded() }
+        .onAppear {
+            conversation.markVisible()
+            conversation.startIfNeeded()
+        }
+        .onDisappear { conversation.markHidden() }
     }
 
     @ViewBuilder
@@ -275,7 +399,7 @@ struct AIReadingSheet: View {
 
                 if let morphology = core.morphology, !morphology.isEmpty {
                     Text(morphology)
-                        .font(.subheadline)
+                        .font(.system(size: 16))
                         .foregroundStyle(.secondary)
                 }
 
@@ -315,35 +439,309 @@ struct AIReadingSheet: View {
                     }
                 }
             } else {
-                Text(answer.translation ?? answer.content ?? "")
+                if answer.type == "chat" {
+                    MarkdownAnswerText(answer.content ?? answer.translation ?? "")
+                } else {
+                    Text(answer.translation ?? answer.content ?? "")
+                }
 
                 if let note = answer.note {
                     Text(note)
-                        .font(.subheadline)
+                        .font(.system(size: 16))
                         .foregroundStyle(.secondary)
                 }
             }
 
             if result.searched {
-                Text("已查询网络")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-
-            ForEach(result.references) { ref in
-                Link(ref.title, destination: ref.url)
-                    .font(.caption)
+                SearchReferencesView(references: result.references)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .font(.system(size: 15))
+        .font(.system(size: 17))
         .textSelection(.enabled)
     }
 
     private func vocabularyLabel(_ title: String) -> some View {
         Text(title)
-            .font(.subheadline.weight(.semibold))
+            .font(.system(size: 16, weight: .semibold))
             .foregroundStyle(.primary.opacity(0.78))
             .padding(.top, 4)
+    }
+}
+
+private struct SearchReferencesView: View {
+    let references: [LireReference]
+
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    expanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Text("已查询网络")
+                    if !references.isEmpty {
+                        Text(expanded ? "收起参考内容" : "展开参考内容")
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                            .rotationEffect(.degrees(expanded ? 180 : 0))
+                    }
+                }
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(references.isEmpty)
+
+            if expanded {
+                VStack(alignment: .leading, spacing: 7) {
+                    ForEach(Array(references.enumerated()), id: \.element.id) { index, reference in
+                        HStack(alignment: .firstTextBaseline, spacing: 7) {
+                            Text("\(index + 1).")
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                            Link(reference.title, destination: reference.url)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+                .font(.system(size: 15))
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .padding(.top, 3)
+    }
+}
+
+private struct CollapsibleSourceText: View {
+    let text: String
+    @Binding var expanded: Bool
+    let expandSheet: () -> Void
+
+    @State private var collapsedHeight: CGFloat = 0
+    @State private var fullHeight: CGFloat = 0
+
+    private var needsExpansion: Bool {
+        fullHeight > collapsedHeight + 1
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(text)
+                .font(.system(size: 16))
+                .foregroundStyle(.secondary)
+                .lineLimit(expanded ? nil : 4)
+                .textSelection(.enabled)
+                .background {
+                    GeometryReader { proxy in
+                        Color.clear.preference(
+                            key: CollapsedSourceHeightKey.self,
+                            value: expanded ? collapsedHeight : proxy.size.height
+                        )
+                    }
+                }
+                .background {
+                    Text(text)
+                        .font(.system(size: 16))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .hidden()
+                        .background {
+                            GeometryReader { proxy in
+                                Color.clear.preference(
+                                    key: FullSourceHeightKey.self,
+                                    value: proxy.size.height
+                                )
+                            }
+                        }
+                }
+
+            if needsExpansion {
+                Button(expanded ? "收起原文" : "展开原文") {
+                    expanded.toggle()
+                    if expanded { expandSheet() }
+                }
+                .font(.caption)
+            }
+        }
+        .onPreferenceChange(CollapsedSourceHeightKey.self) { value in
+            if value > 0 { collapsedHeight = value }
+        }
+        .onPreferenceChange(FullSourceHeightKey.self) { value in
+            if value > 0 { fullHeight = value }
+        }
+    }
+}
+
+private struct CollapsedSourceHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct FullSourceHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct MarkdownAnswerText: View {
+    private enum Block {
+        case heading(level: Int, text: String)
+        case bullet(String)
+        case numbered(marker: String, text: String)
+        case quote(String)
+        case paragraph(String)
+        case rule
+    }
+
+    private let blocks: [Block]
+
+    init(_ source: String) {
+        blocks = Self.parse(source)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                blockView(block)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func blockView(_ block: Block) -> some View {
+        switch block {
+        case .heading(let level, let text):
+            Text(Self.inline(text))
+                .font(headingFont(level))
+                .padding(.top, level <= 2 ? 7 : 3)
+
+        case .bullet(let text):
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("•")
+                Text(Self.inline(text))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.leading, 5)
+
+        case .numbered(let marker, let text):
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(marker)
+                    .monospacedDigit()
+                Text(Self.inline(text))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.leading, 5)
+
+        case .quote(let text):
+            HStack(alignment: .top, spacing: 9) {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.primary.opacity(0.22))
+                    .frame(width: 3)
+                Text(Self.inline(text))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+        case .paragraph(let text):
+            Text(Self.inline(text))
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+        case .rule:
+            Divider()
+        }
+    }
+
+    private func headingFont(_ level: Int) -> Font {
+        switch level {
+        case 1: .title2.bold()
+        case 2: .title3.weight(.semibold)
+        case 3: .headline
+        default: .subheadline.weight(.semibold)
+        }
+    }
+
+    private static func inline(_ text: String) -> AttributedString {
+        (try? AttributedString(
+            markdown: text,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        )) ?? AttributedString(text)
+    }
+
+    private static func parse(_ source: String) -> [Block] {
+        let lines = source.replacingOccurrences(of: "\r\n", with: "\n")
+            .components(separatedBy: "\n")
+        var result: [Block] = []
+        var paragraph: [String] = []
+
+        func flushParagraph() {
+            guard !paragraph.isEmpty else { return }
+            result.append(.paragraph(paragraph.joined(separator: "\n")))
+            paragraph.removeAll(keepingCapacity: true)
+        }
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty {
+                flushParagraph()
+                continue
+            }
+            if ["---", "***", "___"].contains(trimmed) {
+                flushParagraph()
+                result.append(.rule)
+                continue
+            }
+
+            let headingLevel = min(6, trimmed.prefix { $0 == "#" }.count)
+            if headingLevel > 0 {
+                let contentStart = trimmed.index(trimmed.startIndex, offsetBy: headingLevel)
+                let content = trimmed[contentStart...]
+                    .trimmingCharacters(in: .whitespaces)
+                if !content.isEmpty {
+                    flushParagraph()
+                    result.append(.heading(level: headingLevel, text: content))
+                    continue
+                }
+            }
+
+            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ") {
+                flushParagraph()
+                result.append(.bullet(String(trimmed.dropFirst(2))))
+                continue
+            }
+
+            if let dot = trimmed.firstIndex(of: "."), dot != trimmed.startIndex {
+                let markerText = trimmed[..<dot]
+                let afterDot = trimmed.index(after: dot)
+                if markerText.allSatisfy(\.isNumber), afterDot < trimmed.endIndex,
+                   trimmed[afterDot].isWhitespace {
+                    flushParagraph()
+                    let textStart = trimmed.index(after: afterDot)
+                    result.append(.numbered(
+                        marker: String(markerText) + ".",
+                        text: String(trimmed[textStart...])
+                    ))
+                    continue
+                }
+            }
+
+            if trimmed.hasPrefix("> ") {
+                flushParagraph()
+                result.append(.quote(String(trimmed.dropFirst(2))))
+                continue
+            }
+
+            paragraph.append(line)
+        }
+        flushParagraph()
+        return result
     }
 }

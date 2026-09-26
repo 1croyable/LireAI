@@ -61,9 +61,14 @@ final class ReaderSession: ObservableObject {
         }
     }
 
-    func beginLookup(fragments: [String]) {
+    func beginLookup(fragments: [String], bookContext: String) {
+        if let conversation = aiConversation, conversation.shouldContinueForLookup {
+            conversation.appendLookup(fragments: fragments)
+            aiSheetPresented = true
+            return
+        }
         aiConversation?.cancelOutstandingRequest()
-        let conversation = AIReadingConversation(fragments: fragments)
+        let conversation = AIReadingConversation(fragments: fragments, bookContext: bookContext)
         aiConversation = conversation
         aiSheetPresented = true
         conversation.startIfNeeded()
@@ -661,7 +666,7 @@ final class ReaderHost: UIViewController, EPUBNavigatorDelegate {
     @objc
     private func askAI() {
         guard let selected = currentFragment() else { return }
-        session.beginLookup(fragments: [selected.text])
+        session.beginLookup(fragments: [selected.text], bookContext: book.aiMetadataContext)
         navigator.clearSelection()
         pageTurns?.setSelectionActive(false)
     }
@@ -687,7 +692,7 @@ final class ReaderHost: UIViewController, EPUBNavigatorDelegate {
             session.error = "合并后的选文过长，请缩短当前选文后重试。暂存片段已保留。"
             return
         }
-        session.beginLookup(fragments: fragments)
+        session.beginLookup(fragments: fragments, bookContext: book.aiMetadataContext)
         session.pendingSelection = nil
         navigator.clearSelection()
         pageTurns?.setSelectionActive(false)
@@ -748,9 +753,7 @@ final class ReaderHost: UIViewController, EPUBNavigatorDelegate {
         commitLocation(locator)
     }
 
-    /// WebKit auto-scrolls when a selection handle reaches a column edge even
-    /// if its UIScrollView pan recognizer is disabled. Keep the selected text's
-    /// viewport on the original column; Readium still owns the selection range.
+    /// Keeps WebKit selection handles from scrolling away from the current column.
     private func installSelectionPageLock() {
         let script = """
         (() => {
@@ -791,9 +794,7 @@ final class ReaderHost: UIViewController, EPUBNavigatorDelegate {
         }
     }
 
-    /// Readium positions are fixed text markers, not pages. Query the current
-    /// WebKit columns so the displayed count follows font size and viewport.
-    /// Wait on the actual painted layout instead of guessing with a fixed delay.
+    /// Derives displayed pages from painted WebKit columns after layout changes.
     private func updateRenderedPageNumber() {
         renderedPageTask?.cancel()
         renderedPageTask = Task { [weak self] in

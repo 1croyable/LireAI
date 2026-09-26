@@ -13,6 +13,27 @@ struct BookRecord: Identifiable, Codable, Equatable {
     var progression: Double
     var position: Int?
     var positionCount: Int?
+
+    var aiMetadataContext: String {
+        func singleLine(_ value: String) -> String {
+            value.replacingOccurrences(of: "\n", with: " ")
+                .replacingOccurrences(of: "\r", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        var lines = ["title: \(singleLine(title))"]
+        let author = singleLine(author)
+        if !author.isEmpty { lines.append("authors: \(author)") }
+        if let identifier {
+            let identifier = singleLine(identifier)
+            if !identifier.isEmpty { lines.append("identifier: \(identifier)") }
+        }
+        return """
+        BOOK_METADATA_BEGIN
+        \(lines.joined(separator: "\n"))
+        BOOK_METADATA_END
+        """
+    }
 }
 
 @MainActor final class LibraryStore: ObservableObject {
@@ -75,9 +96,7 @@ struct BookRecord: Identifiable, Codable, Equatable {
         removeOrphanBookDirectories()
     }
 
-    /// An import is only added to library.json after every preparation step has
-    /// finished. If iOS terminates the app mid-import, remove that unreferenced
-    /// working directory on the next launch instead of leaving partial caches.
+    /// Removes partial import directories left by an interrupted import.
     private func removeOrphanBookDirectories() {
         let booksRoot = support.appendingPathComponent("Books", isDirectory: true)
         guard let directories = try? files.contentsOfDirectory(
