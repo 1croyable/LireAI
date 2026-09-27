@@ -191,7 +191,7 @@ enum RenderedPageLocation {
     /// Fast visual sanity check for the live page bitmap. The test samples only
     /// the reading area (not the native title/folio labels) and needs just a few
     /// non-paper pixels to accept a sparse chapter/title page.
-    static func hasVisibleInk(_ image: UIImage, paper: UIColor) -> Bool {
+    static func hasVisibleInk(_ image: UIImage, paper: UIColor, minimumContrast: Int = 72) -> Bool {
         guard let source = image.cgImage else { return false }
         var pr: CGFloat = 0, pg: CGFloat = 0, pb: CGFloat = 0, pa: CGFloat = 0
         guard paper.getRed(&pr, green: &pg, blue: &pb, alpha: &pa) else { return true }
@@ -227,10 +227,33 @@ enum RenderedPageLocation {
                     + abs(Int(pixels[offset + 1]) - paperG)
                     + abs(Int(pixels[offset + 2]) - paperB)
                 sampled += 1
-                if delta > 72 { changed += 1 }
+                if delta > minimumContrast { changed += 1 }
             }
         }
         return changed >= max(6, sampled / 1200)
+    }
+
+    static func hasVisiblePageText(_ navigator: EPUBNavigatorViewController) async -> Bool {
+        let result = await navigator.evaluateJavaScript("""
+        (() => {
+          const width = window.innerWidth;
+          const height = window.innerHeight;
+          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+          let node;
+          while ((node = walker.nextNode())) {
+            if (!node.nodeValue || !node.nodeValue.trim()) continue;
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            for (const rect of range.getClientRects()) {
+              if (rect.width > 0.5 && rect.height > 0.5 && rect.right > 0
+                  && rect.left < width && rect.bottom > 0 && rect.top < height) return true;
+            }
+          }
+          return false;
+        })()
+        """)
+        if case .success(let visible as Bool) = result { return visible }
+        return false
     }
 
     static func isPaintReady(_ navigator: EPUBNavigatorViewController, at locator: Locator, paper: UIColor? = nil, text: UIColor? = nil) async -> Bool {
@@ -316,6 +339,7 @@ final class PageTurnCoordinator: NSObject, UIGestureRecognizerDelegate {
     private(set) var isActive = false
     var persistenceBlocked: Bool { isSynchronizing || !settledCover.isHidden }
     var currentSnapshotImage: UIImage? { cache.current?.image }
+    var isSelectionActive: Bool { selectionActive || navigator.currentSelection != nil }
 
     init(navigator: EPUBNavigatorViewController, container: UIView, didCommit: @escaping (Locator, Bool) -> Void,
          stateChanged: @escaping (Bool) -> Void, didFail: @escaping (String) -> Void,
@@ -371,6 +395,7 @@ final class PageTurnCoordinator: NSObject, UIGestureRecognizerDelegate {
     }
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if navigator.currentSelection == nil { selectionActive = false }
         guard !closed, !isActive, !selectionActive, navigator.currentSelection == nil,
               let locator = cache.current?.locator ?? navigator.currentLocation,
               let pan = gestureRecognizer as? UIPanGestureRecognizer, let container else { return false }
@@ -680,7 +705,7 @@ final class PageTurnCoordinator: NSObject, UIGestureRecognizerDelegate {
                 Task { [weak self] in await self?.refreshCurrentSnapshot() }
             }
         }
-        guard !isActive, !persistenceBlocked, !closed, let container,
+        guard !isActive, !persistenceBlocked, !closed, navigator.currentSelection == nil, let container,
               let locator = captureLocation ?? navigator.currentLocation else { return false }
 
         var stablePaintSamples = 0
@@ -701,7 +726,7 @@ final class PageTurnCoordinator: NSObject, UIGestureRecognizerDelegate {
                       !isActive, !persistenceBlocked, !closed else { return false }
                 let expectsVisibleContent = await RenderedPageLocation.hasVisiblePageContent(navigator)
                 guard let image = await capture(at: locator), generation == cacheGeneration,
-                      !isActive, !Task.isCancelled else { return false }
+                      navigator.currentSelection == nil, !isActive, !Task.isCancelled else { return false }
 
                 if expectsVisibleContent,
                    !RenderedPageLocation.hasVisibleInk(image, paper: paperColor) {

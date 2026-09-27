@@ -119,8 +119,8 @@ final class AIReadingConversation: ObservableObject, Identifiable {
             ))
         }
 
-        let progress = question == nil ? "正在理解…" : "正在判断是否需要联网…"
-        let historyUser = nextSource?.prompt ?? question ?? ""
+        let progress = "正在理解…"
+        let historyUser = nextSource?.context ?? question ?? ""
         let spec = RequestSpec(
             sequence: sequence,
             question: question,
@@ -169,22 +169,10 @@ final class AIReadingConversation: ObservableObject, Identifiable {
                 return
             }
 
-            var contextParts = [result.answer.conversationText]
-            if !result.references.isEmpty {
-                let sources = result.references
-                    .map { "\($0.title): \($0.url.absoluteString)" }
-                    .joined(separator: "\n")
-                contextParts.append("Sources:\n\(sources)")
-            }
-            if result.searched {
-                contextParts.append("[This answer used web search.]")
-            }
-            let conversationText = contextParts.joined(separator: "\n")
-
             completedTurns[requestID] = CompletedTurn(
                 sequence: spec.sequence,
                 user: spec.historyUser,
-                assistant: conversationText
+                assistant: result.answer.conversationText
             )
             updateMessage(requestID) {
                 $0.result = result
@@ -226,7 +214,7 @@ final class AIReadingConversation: ObservableObject, Identifiable {
         let text: String
         switch stage {
         case .decidingSearch:
-            text = "正在判断是否需要联网…"
+            text = "正在理解…"
         case .searchingWeb:
             activeSearchRequestIDs.insert(requestID)
             activeSearchRequestCount = activeSearchRequestIDs.count
@@ -429,7 +417,7 @@ struct AIReadingSheet: View {
                 }
 
                 let supplement = ([answer.contextNote].compactMap { $0 } +
-                    (answer.extras ?? []).prefix(2).map { "\($0.title)：\($0.content)" })
+                    (answer.extras ?? []).map { "\($0.title)：\($0.content)" })
                     .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
                 if !supplement.isEmpty {
                     vocabularyLabel("补充：")

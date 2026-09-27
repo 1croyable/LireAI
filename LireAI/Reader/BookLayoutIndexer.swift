@@ -612,6 +612,7 @@ final class BookLayoutIndexer {
         for _ in 0..<16 {
             guard !Task.isCancelled, !closed else { return nil }
             let expectsVisibleContent = await RenderedPageLocation.hasVisiblePageContent(navigator)
+            let expectsVisibleText = await RenderedPageLocation.hasVisiblePageText(navigator)
             if let image = await RenderedPageLocation.snapshot(
                 navigator,
                 at: locator,
@@ -621,7 +622,10 @@ final class BookLayoutIndexer {
                 folioColor: captureTextColor.withAlphaComponent(0.58),
                 safeBottom: navigator.view.window?.safeAreaInsets.bottom
             ) {
-                if !expectsVisibleContent || RenderedPageLocation.hasVisibleInk(image, paper: capturePaperColor) {
+                if (!expectsVisibleContent || RenderedPageLocation.hasVisibleInk(image, paper: capturePaperColor))
+                    && (!expectsVisibleText || RenderedPageLocation.hasVisibleInk(
+                        image, paper: capturePaperColor, minimumContrast: 250
+                    )) {
                     return image
                 }
             }

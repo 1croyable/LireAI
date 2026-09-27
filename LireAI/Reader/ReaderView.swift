@@ -631,6 +631,8 @@ final class ReaderHost: UIViewController, EPUBNavigatorDelegate {
 
     func revalidateAfterForeground() {
         guard navigatorInstalled, !isClosed else { return }
+        navigator.clearSelection()
+        pageTurns?.setSelectionActive(false)
         readerReadyTask?.cancel()
         withAnimation(.easeInOut(duration: 0.16)) {
             session.readerReady = false
@@ -870,11 +872,15 @@ final class ReaderHost: UIViewController, EPUBNavigatorDelegate {
         _ navigator: VisualNavigator,
         didTapAt point: CGPoint
     ) {
-        if self.navigator.currentSelection == nil { pageTurns?.setSelectionActive(false) }
-        else { pageTurns?.refreshGesturePriority() }
-        guard self.navigator.currentSelection == nil, pageTurns?.isActive != true else {
+        if pageTurns?.isSelectionActive == true {
+            Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(100))
+                guard let self, !self.isClosed, self.navigator.currentSelection == nil else { return }
+                self.pageTurns?.setSelectionActive(false)
+            }
             return
         }
+        guard pageTurns?.isActive != true else { return }
 
         session.toggleChrome()
     }
