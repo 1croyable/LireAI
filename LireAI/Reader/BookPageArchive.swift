@@ -12,7 +12,7 @@ enum ReaderStartupSnapshotCache {
     }
 
     private static func directory(for bookID: UUID) -> URL {
-        let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("LireAI-StartupPages-v2", isDirectory: true)
+        let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("LireAI-StartupPages-v1.10", isDirectory: true)
         return root.appendingPathComponent(bookID.uuidString, isDirectory: true)
     }
 

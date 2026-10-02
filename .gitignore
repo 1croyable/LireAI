@@ -16,3 +16,6 @@ build/
 
 # SwiftPM local state
 .swiftpm/xcode/package.xcworkspace/xcuserdata/
+
+# private documents
+docs/private/*

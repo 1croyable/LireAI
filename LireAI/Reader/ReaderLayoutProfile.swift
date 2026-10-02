@@ -41,9 +41,10 @@ enum ReaderLayoutProfile {
                     .eraseToAnyHTMLFontFamilyDeclaration()
             ]
         )
+        // Shift only the EPUB body down 14 points, preserving its available height.
         config.contentInset = [
-            .compact: (top: 106, bottom: 88),
-            .regular: (top: 112, bottom: 92)
+            .compact: (top: 120, bottom: 74),
+            .regular: (top: 126, bottom: 78)
         ]
         return config
     }

@@ -400,15 +400,15 @@ struct AIReadingSheet: View {
 
                         if let definition = sense.definitionFr, !definition.isEmpty {
                             vocabularyLabel("法语解释：")
-                            Text(definition)
+                            Text(MarkdownAnswerText.inline(definition))
                                 .padding(.leading, 15)
                         }
                         if let example = sense.exampleFr, !example.isEmpty {
                             vocabularyLabel("例句：")
-                            Text(example)
+                            Text(MarkdownAnswerText.inline(example))
                                 .padding(.leading, 15)
                             if let translation = sense.exampleZh, !translation.isEmpty {
-                                Text(translation)
+                                Text(MarkdownAnswerText.inline(translation))
                                     .foregroundStyle(.secondary)
                                     .padding(.leading, 15)
                             }
@@ -422,7 +422,7 @@ struct AIReadingSheet: View {
                 if !supplement.isEmpty {
                     vocabularyLabel("补充：")
                     ForEach(supplement, id: \.self) { text in
-                        Text(text)
+                        Text(MarkdownAnswerText.inline(text))
                             .padding(.leading, 15)
                     }
                 }
@@ -430,11 +430,11 @@ struct AIReadingSheet: View {
                 if answer.type == "chat" {
                     MarkdownAnswerText(answer.content ?? answer.translation ?? "")
                 } else {
-                    Text(answer.translation ?? answer.content ?? "")
+                    MarkdownAnswerText(answer.translation ?? answer.content ?? "")
                 }
 
                 if let note = answer.note {
-                    Text(note)
+                    Text(MarkdownAnswerText.inline(note))
                         .font(.system(size: 16))
                         .foregroundStyle(.secondary)
                 }
@@ -657,7 +657,7 @@ private struct MarkdownAnswerText: View {
         }
     }
 
-    private static func inline(_ text: String) -> AttributedString {
+    fileprivate static func inline(_ text: String) -> AttributedString {
         (try? AttributedString(
             markdown: text,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)

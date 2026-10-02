@@ -16,11 +16,11 @@ struct PaperFoldGeometry {
     let normal: CGVector
     let distance: CGFloat
 
-    /// The curved arc is about 150% of the dragged span. This deliberately
+    /// The curved arc is about 170% of the dragged span. This deliberately
     /// lifts a broad part of the sheet instead of concentrating the bend in a
     /// narrow strip next to the crease.
     static func curlRadius(for distance: CGFloat) -> CGFloat {
-        min(150, max(2, distance * 0.4775))
+        min(180, max(2, distance * (1.8 / .pi)))
     }
 
     /// Places the cylindrical surface so that the original point held on the
