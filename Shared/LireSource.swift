@@ -46,6 +46,6 @@ struct LireSource {
             ? "The fragments are adjacent in reading order and may split a sentence or word. Do not invent missing text. "
             : ""
         return context + "\n\n" + boundary
-            + "This is a new selection. Explain a standalone word independently with its distinct useful common senses; translate a sentence or paragraph."
+            + "New quoted selection: explain a standalone French word or fixed expression; translate an entire sentence, clause or passage. Do not replace a passage with a card for one word."
     }
 }

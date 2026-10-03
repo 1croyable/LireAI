@@ -194,7 +194,7 @@ struct BookRecord: Identifiable, Codable, Equatable {
         let fontStep = Int((fontSize * 100).rounded())
         let width = Int(viewport.width.rounded())
         let height = Int(viewport.height.rounded())
-        return "f\(fontStep)|\(width)x\(height)"
+        return "Iowan-v2|f\(fontStep)|\(width)x\(height)"
     }
 
     private func loadPaginationCache(for book: BookRecord) -> PaginationCacheFile {

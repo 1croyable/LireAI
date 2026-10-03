@@ -11,6 +11,7 @@ struct ContentView: View {
     @State private var importingTitle = ""
     @State private var importingCoverURL: URL?
     @State private var showingSettings = false
+    @State private var showingVocabularyNotes = false
     @State private var reading: BookRecord?
     @State private var bookPendingDeletion: BookRecord?
     @State private var error: String?
@@ -45,6 +46,7 @@ struct ContentView: View {
         .navigationBarTitleDisplayMode(.large)
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar { navigationToolbar }
+        .sheet(isPresented: $showingVocabularyNotes) { VocabularyNotesView() }
         .sheet(isPresented: $showingSettings) { SettingsView().preferredColorScheme(.light) }
         .fullScreenCover(item: $reading) { book in ReaderView(book: book, library: library) { reading = nil } }
         .fileImporter(isPresented: $importing, allowedContentTypes: [epubType], onCompletion: handleImportResult)
@@ -119,7 +121,13 @@ struct ContentView: View {
         .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 18))
     }
 
-    private var navigationToolbar: some ToolbarContent {
+    @ToolbarContentBuilder private var navigationToolbar: some ToolbarContent {
+        ToolbarItem(placement: .topBarTrailing) {
+            Button { showingVocabularyNotes = true } label: {
+                Image(systemName: "note.text")
+                    .font(.body.weight(.medium)).foregroundStyle(primaryText)
+            }.accessibilityLabel("查词便签")
+        }
         ToolbarItem(placement: .topBarTrailing) {
             Button { showingSettings = true } label: {
                 Image(systemName: "gearshape")

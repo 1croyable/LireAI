@@ -61,14 +61,14 @@ final class ReaderSession: ObservableObject {
         }
     }
 
-    func beginLookup(fragments: [String], bookContext: String) {
+    func beginLookup(fragments: [String], book: BookRecord) {
         if let conversation = aiConversation, conversation.shouldContinueForLookup {
             conversation.appendLookup(fragments: fragments)
             aiSheetPresented = true
             return
         }
         aiConversation?.cancelOutstandingRequest()
-        let conversation = AIReadingConversation(fragments: fragments, bookContext: bookContext)
+        let conversation = AIReadingConversation(fragments: fragments, bookContext: book.aiMetadataContext, bookID: book.id, bookTitle: book.title)
         aiConversation = conversation
         aiSheetPresented = true
         conversation.startIfNeeded()
@@ -668,7 +668,7 @@ final class ReaderHost: UIViewController, EPUBNavigatorDelegate {
     @objc
     private func askAI() {
         guard let selected = currentFragment() else { return }
-        session.beginLookup(fragments: [selected.text], bookContext: book.aiMetadataContext)
+        session.beginLookup(fragments: [selected.text], book: book)
         navigator.clearSelection()
         pageTurns?.setSelectionActive(false)
     }
@@ -694,7 +694,7 @@ final class ReaderHost: UIViewController, EPUBNavigatorDelegate {
             session.error = "合并后的选文过长，请缩短当前选文后重试。暂存片段已保留。"
             return
         }
-        session.beginLookup(fragments: fragments, bookContext: book.aiMetadataContext)
+        session.beginLookup(fragments: fragments, book: book)
         session.pendingSelection = nil
         navigator.clearSelection()
         pageTurns?.setSelectionActive(false)
@@ -932,6 +932,7 @@ struct ReaderView: View {
     @StateObject private var session = ReaderSession()
     @State private var host: ReaderHost?
     @State private var showingFontSize = false
+    @State private var showingVocabularyNotes = false
     @State private var startupBookCover: UIImage?
     @State private var pendingNavigation: ReaderNavigationTarget?
     @State private var sceneWasBackgrounded = false
@@ -1089,6 +1090,14 @@ struct ReaderView: View {
                                         foreground: chromeForeground,
                                         hasPendingSelection: session.pendingSelection != nil,
                                         cancelPendingSelection: { session.pendingSelection = nil },
+                                        openNotes: {
+                                            showingFontSize = false
+                                            session.hideChrome()
+                                            Task { @MainActor in
+                                                try? await Task.sleep(for: .milliseconds(180))
+                                                showingVocabularyNotes = true
+                                            }
+                                        },
                                         openNavigation: {
                                             showingFontSize = false
                                             session.hideChrome()
@@ -1127,6 +1136,9 @@ struct ReaderView: View {
                 AIReadingSheet(conversation: conversation)
                     .id(conversation.id)
             }
+        }
+        .sheet(isPresented: $showingVocabularyNotes) {
+            VocabularyNotesView(bookID: book.id, bookTitle: book.title)
         }
         .sheet(isPresented: $session.navigationSheetPresented, onDismiss: performPendingNavigation) {
             ReaderNavigationSheet(

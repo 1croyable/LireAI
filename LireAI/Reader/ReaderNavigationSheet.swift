@@ -20,6 +20,7 @@ struct ReaderSettingsPopover: View {
     let foreground: Color
     let hasPendingSelection: Bool
     let cancelPendingSelection: () -> Void
+    let openNotes: () -> Void
     let openNavigation: () -> Void
 
     @State private var revealedItems = 0
@@ -60,6 +61,20 @@ struct ReaderSettingsPopover: View {
             .pickerStyle(.segmented)
             .padding(10)
             .readerMenuBubble(visible: revealedItems >= 2)
+
+            Button(action: openNotes) {
+                HStack(spacing: 10) {
+                    Image(systemName: "note.text")
+                    Text("本书今日查词")
+                    Spacer(minLength: 0)
+                }
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(foreground)
+                .padding(.horizontal, 14)
+                .frame(height: 42)
+            }
+            .buttonStyle(.plain)
+            .readerMenuBubble(visible: revealedItems >= 3)
 
             Button {
                 closeThenOpenNavigation()

@@ -33,6 +33,8 @@ final class AIReadingConversation: ObservableObject, Identifiable {
     let source: String
     let sourceFragments: [String]?
     let bookContext: String
+    let bookID: UUID
+    let bookTitle: String
 
     @Published fileprivate var messages: [ChatMessage] = []
     @Published var question = ""
@@ -53,13 +55,15 @@ final class AIReadingConversation: ObservableObject, Identifiable {
     var hasCompletedAnswer: Bool { !completedTurns.isEmpty }
     var shouldContinueForLookup: Bool { activeSearchRequestCount > 0 || hasUnreadSearchResult }
 
-    init(fragments: [String], bookContext: String) {
+    init(fragments: [String], bookContext: String, bookID: UUID, bookTitle: String) {
         let clean = fragments
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         sourceFragments = clean.count > 1 ? clean : nil
         source = clean.joined(separator: " ")
         self.bookContext = bookContext
+        self.bookID = bookID
+        self.bookTitle = bookTitle
     }
 
     func startIfNeeded() {
@@ -104,7 +108,7 @@ final class AIReadingConversation: ObservableObject, Identifiable {
             $0.errorText = nil
             $0.progressText = spec.progressText
         }
-        startTask(requestID: requestID, spec: spec, history: historySnapshot(before: spec.sequence))
+        startTask(requestID: requestID, spec: spec)
     }
 
     private func launch(question: String?, nextSource: LireSource?, displayText: String?) {
@@ -132,18 +136,22 @@ final class AIReadingConversation: ObservableObject, Identifiable {
             id: requestID, role: .assistant, text: nil,
             result: nil, progressText: progress, errorText: nil
         ))
-        startTask(requestID: requestID, spec: spec, history: historySnapshot(before: sequence))
+        startTask(requestID: requestID, spec: spec)
     }
 
     private func startTask(
         requestID: UUID,
-        spec: RequestSpec,
-        history: [(String, String)]
+        spec: RequestSpec
     ) {
+        // New selections may arrive while an earlier answer is still running.
+        // Wait for those answers before taking the full chronological history.
+        let precedingTasks = Array(requestTasks.values)
         activeRequestCount += 1
         requestTasks[requestID] = Task { [weak self] in
             guard let self else { return }
-            await send(requestID: requestID, spec: spec, history: history)
+            for task in precedingTasks { await task.value }
+            guard !Task.isCancelled else { return }
+            await send(requestID: requestID, spec: spec, history: historySnapshot(before: spec.sequence))
         }
     }
 
@@ -169,6 +177,7 @@ final class AIReadingConversation: ObservableObject, Identifiable {
                 return
             }
 
+            VocabularyNotesStore.shared.record(result.answer, requestID: requestID, bookID: bookID, bookTitle: bookTitle)
             completedTurns[requestID] = CompletedTurn(
                 sequence: spec.sequence,
                 user: spec.historyUser,
@@ -376,68 +385,17 @@ struct AIReadingSheet: View {
         let answer = result.answer
 
         VStack(alignment: .leading, spacing: 8) {
-            if answer.type == "vocabulary", let core = answer.core {
-                Text(core.display ?? conversation.source)
-                    .font(.title2.bold())
-
-                Text([core.lemma, core.partOfSpeech]
-                    .compactMap { $0 }
-                    .joined(separator: " · "))
-                .foregroundStyle(.secondary)
-
-                if let morphology = core.morphology, !morphology.isEmpty {
-                    Text(morphology)
-                        .font(.system(size: 16))
-                        .foregroundStyle(.secondary)
-                }
-
-                ForEach(Array(core.displayedSenses.enumerated()), id: \.offset) { index, sense in
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text((core.displayedSenses.count > 1 ? "\(index + 1). " : "") +
-                             (sense.translationsZh ?? []).joined(separator: "；"))
-                            .font(.headline)
-                            .padding(.top, index == 0 ? 3 : 9)
-
-                        if let definition = sense.definitionFr, !definition.isEmpty {
-                            vocabularyLabel("法语解释：")
-                            Text(MarkdownAnswerText.inline(definition))
-                                .padding(.leading, 15)
-                        }
-                        if let example = sense.exampleFr, !example.isEmpty {
-                            vocabularyLabel("例句：")
-                            Text(MarkdownAnswerText.inline(example))
-                                .padding(.leading, 15)
-                            if let translation = sense.exampleZh, !translation.isEmpty {
-                                Text(MarkdownAnswerText.inline(translation))
-                                    .foregroundStyle(.secondary)
-                                    .padding(.leading, 15)
-                            }
-                        }
-                    }
-                }
-
-                let supplement = ([answer.contextNote].compactMap { $0 } +
-                    (answer.extras ?? []).map { "\($0.title)：\($0.content)" })
-                    .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-                if !supplement.isEmpty {
-                    vocabularyLabel("补充：")
-                    ForEach(supplement, id: \.self) { text in
-                        Text(MarkdownAnswerText.inline(text))
-                            .padding(.leading, 15)
-                    }
-                }
-            } else {
-                if answer.type == "chat" {
-                    MarkdownAnswerText(answer.content ?? answer.translation ?? "")
+            ForEach(answer.displayedBlocks) { block in
+                if block.type == "vocabulary", let core = block.core {
+                    vocabularyCard(core, block: block)
                 } else {
-                    MarkdownAnswerText(answer.translation ?? answer.content ?? "")
+                    MarkdownAnswerText(block.text ?? "")
                 }
-
-                if let note = answer.note {
-                    Text(MarkdownAnswerText.inline(note))
-                        .font(.system(size: 16))
-                        .foregroundStyle(.secondary)
-                }
+            }
+            if let note = answer.note, !note.isEmpty {
+                SelectableAnswerText(note, size: 16, secondary: true)
+                    .font(.system(size: 16))
+                    .foregroundStyle(.secondary)
             }
 
             if result.searched {
@@ -449,9 +407,71 @@ struct AIReadingSheet: View {
         .textSelection(.enabled)
     }
 
+    private func vocabularyCard(_ core: LireAnswer.Core, block: LireAnswer.Block) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SelectableAnswerText(core.display ?? "", size: 22, bold: true)
+
+            SelectableAnswerText(core.dictionaryForm, secondary: true)
+
+            ForEach(Array(core.displayedSenses.enumerated()), id: \.offset) { index, sense in
+                VStack(alignment: .leading, spacing: 7) {
+                    let heading = (core.displayedSenses.count > 1 ? "\(index + 1). " : "") +
+                        [FrenchPartOfSpeech.abbreviation(sense.partOfSpeech ?? core.partOfSpeech ?? ""),
+                         (sense.translationsZh ?? []).joined(separator: "；")].filter { !$0.isEmpty }.joined(separator: " ")
+                    SelectableAnswerText(heading, bold: true)
+                        .padding(.top, index == 0 ? 3 : 9)
+
+                    if let definition = sense.definitionFr, !definition.isEmpty {
+                        vocabularyLabel("法语解释：")
+                        SelectableAnswerText(definition)
+                            .padding(.leading, 15)
+                    }
+                    if let example = sense.exampleFr, !example.isEmpty {
+                        vocabularyLabel("例句：")
+                        SelectableAnswerText(example)
+                            .padding(.leading, 15)
+                        if let translation = sense.exampleZh, !translation.isEmpty {
+                            SelectableAnswerText(translation, secondary: true)
+                                .padding(.leading, 15)
+                        }
+                    }
+                    if !(sense.collocations ?? []).isEmpty || !(sense.usageNote ?? "").isEmpty {
+                        vocabularyLabel("补充：")
+                        ForEach(Array((sense.collocations ?? []).enumerated()), id: \.offset) { _, usage in
+                            SelectableAnswerText(usage, size: 15, secondary: true)
+                                .padding(.leading, 15)
+                        }
+                        if let note = sense.usageNote, !note.isEmpty {
+                            SelectableAnswerText(note, size: 15, secondary: true)
+                                .padding(.leading, 15)
+                        }
+                    }
+                }
+            }
+
+            let supplement = ([block.contextNote].compactMap { $0 } +
+                (block.extras ?? []).map { "\($0.title)：\($0.content)" })
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            if !supplement.isEmpty {
+                vocabularyLabel("补充：")
+                ForEach(supplement, id: \.self) { text in
+                    SelectableAnswerText(text, size: 15, secondary: true)
+                        .padding(.leading, 15)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .environment(\.answerCalligraphy, false)
+        .padding(16)
+        .background(Color(uiColor: .secondarySystemBackground).opacity(0.65), in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.primary.opacity(0.07)))
+        .shadow(color: .black.opacity(0.16), radius: 10, x: 0, y: 7)
+        .shadow(color: .black.opacity(0.06), radius: 3, x: 0, y: 1)
+        .padding(.vertical, 5)
+    }
+
     private func vocabularyLabel(_ title: String) -> some View {
-        Text(title)
-            .font(.system(size: 16, weight: .semibold))
+        SelectableAnswerText(title, size: 16, bold: true)
             .foregroundStyle(.primary.opacity(0.78))
             .padding(.top, 4)
     }
@@ -608,14 +628,13 @@ private struct MarkdownAnswerText: View {
     private func blockView(_ block: Block) -> some View {
         switch block {
         case .heading(let level, let text):
-            Text(Self.inline(text))
-                .font(headingFont(level))
+            SelectableAnswerText(text, size: level <= 2 ? 21 : 17, bold: true)
                 .padding(.top, level <= 2 ? 7 : 3)
 
         case .bullet(let text):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text("•")
-                Text(Self.inline(text))
+                SelectableAnswerText(text)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(.leading, 5)
@@ -624,7 +643,7 @@ private struct MarkdownAnswerText: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(marker)
                     .monospacedDigit()
-                Text(Self.inline(text))
+                SelectableAnswerText(text)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(.leading, 5)
@@ -634,34 +653,17 @@ private struct MarkdownAnswerText: View {
                 RoundedRectangle(cornerRadius: 1)
                     .fill(Color.primary.opacity(0.22))
                     .frame(width: 3)
-                Text(Self.inline(text))
-                    .foregroundStyle(.secondary)
+                SelectableAnswerText(text, secondary: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
         case .paragraph(let text):
-            Text(Self.inline(text))
+            SelectableAnswerText(text)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
         case .rule:
             Divider()
         }
-    }
-
-    private func headingFont(_ level: Int) -> Font {
-        switch level {
-        case 1: .title2.bold()
-        case 2: .title3.weight(.semibold)
-        case 3: .headline
-        default: .subheadline.weight(.semibold)
-        }
-    }
-
-    fileprivate static func inline(_ text: String) -> AttributedString {
-        (try? AttributedString(
-            markdown: text,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        )) ?? AttributedString(text)
     }
 
     private static func parse(_ source: String) -> [Block] {

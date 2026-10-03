@@ -8,12 +8,13 @@ import ReadiumNavigator
 /// pagination precomputer. Keeping them in one place makes a cached page-count
 /// map valid for exactly the layout the user will later see.
 enum ReaderLayoutProfile {
+    static let readingFont: FontFamily = .iowanOldStyle
     static let fontSizes: [Double] = stride(from: 90, through: 150, by: 2).map { Double($0) / 100.0 }
 
     static func preferences(fontSize: Double, theme: ReaderThemeMode = .warm) -> EPUBPreferences {
         EPUBPreferences(
             backgroundColor: ReadiumNavigator.Color(hex: theme.paperHex),
-            fontFamily: .iowanOldStyle,
+            fontFamily: readingFont,
             fontSize: fontSize,
             hyphens: true,
             letterSpacing: 0,
@@ -37,7 +38,7 @@ enum ReaderLayoutProfile {
             preferences: preferences(fontSize: fontSize, theme: theme),
             editingActions: editingActions,
             fontFamilyDeclarations: [
-                CSSFontFamilyDeclaration(fontFamily: .iowanOldStyle, alternates: [.palatino, .georgia, .serif])
+                CSSFontFamilyDeclaration(fontFamily: readingFont, alternates: [.palatino, .georgia, .serif])
                     .eraseToAnyHTMLFontFamilyDeclaration()
             ]
         )
