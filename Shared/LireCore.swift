@@ -300,8 +300,7 @@ struct LireClient {
         }
 
         let selection = nextSource ?? (question == nil ? readingSource : nil)
-        let latestRequest = selection.map { "NEW_SELECTION\n" + $0.prompt }
-            ?? "FOLLOW_UP\n" + (question ?? "")
+        let latestRequest = selection?.prompt ?? question ?? ""
         let plan: SearchDecision
         if selection != nil {
             plan = SearchDecision(needsSearch: false, query: nil)
@@ -325,10 +324,9 @@ struct LireClient {
                 : "\nWEB_CONTEXT_BEGIN\n\(retrieval.context)\nWEB_CONTEXT_END"
         }
         let selectionKind = selection == nil ? nil : "lookup"
-        let format = selection != nil
-            ? "This is a quoted lookup, not discussion. Return ONLY a vocabulary JSON object for a standalone French word/fixed expression, or ONLY a translation JSON object for a sentence/clause/passage. No opening or closing prose, no note. Translate the whole passage, never just explain one word."
-            : "Return the response JSON type with ordered markdown/vocabulary blocks."
-        inputs.append(["role": "user", "content": latestRequest + "\n" + format + webContext])
+        if nextSource != nil || question != nil {
+            inputs.append(["role": "user", "content": latestRequest + webContext])
+        }
         progress?(.answering(searched: searched))
         var issue = "JSON 字段无法解码"
         return try await AIAnswerRecovery.run(generate: {
