@@ -66,7 +66,7 @@ struct SettingsView: View {
                     TextField("工具域名（可留空）", text: $vocabularyDomain)
                         .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
                 } header: { Text("背单词工具") } footer: {
-                    Text("保存你的背单词工具域名。导入接口尚未配置，目前只整理便签数据，不会发送。")
+                    Text("填写背单词工具域名。便签提交时会按需登录，并保存到该工具。")
                 }
                 Section("使用说明") {
                     Text("选中文字后点击“AI 查找”：词汇显示卡片，句段直接翻译。")

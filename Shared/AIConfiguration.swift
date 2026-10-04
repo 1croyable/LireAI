@@ -2,16 +2,13 @@ import Foundation
 import Security
 
 enum AIProvider: String, CaseIterable, Identifiable, Codable {
-    case mistral, deepseek, gemini, openrouter, openai, grok, groq
+    case groq, mistral, openai, deepseek
     var id: String { rawValue }
     var title: String {
         switch self {
         case .mistral: "Mistral"
         case .deepseek: "DeepSeek"
-        case .gemini: "Gemini"
-        case .openrouter: "OpenRouter"
         case .openai: "OpenAI"
-        case .grok: "Grok (xAI)"
         case .groq: "Groq"
         }
     }
@@ -20,10 +17,7 @@ enum AIProvider: String, CaseIterable, Identifiable, Codable {
         switch self {
         case .mistral: value = "https://api.mistral.ai/v1/"
         case .deepseek: value = "https://api.deepseek.com/"
-        case .gemini: value = "https://generativelanguage.googleapis.com/v1beta/openai/"
-        case .openrouter: value = "https://openrouter.ai/api/v1/"
         case .openai: value = "https://api.openai.com/v1/"
-        case .grok: value = "https://api.x.ai/v1/"
         case .groq: value = "https://api.groq.com/openai/v1/"
         }
         return URL(string: value)!

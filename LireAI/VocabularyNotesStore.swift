@@ -36,6 +36,13 @@ final class VocabularyNotesStore: ObservableObject {
         notes.sort { $0.createdAt > $1.createdAt }
         retrySave()
     }
+    func markSubmitted(_ ids: Set<UUID>, at date: Date = Date()) {
+        guard !loadBlocked, !ids.isEmpty else { return }
+        for index in notes.indices where ids.contains(notes[index].id) {
+            notes[index].submittedAt = date
+        }
+        retrySave()
+    }
     func retrySave() {
         guard !loadBlocked else { return }
         do {
@@ -56,8 +63,5 @@ final class VocabularyNotesStore: ObservableObject {
     }
     func selectedNotes(days: Set<Date>, calendar: Calendar = .current) -> [VocabularyNote] {
         notes.filter { days.contains(calendar.startOfDay(for: $0.createdAt)) }
-    }
-    func importPayload(days: Set<Date>, calendar: Calendar = .current) throws -> String {
-        try VocabularyNote.importPayload(selectedNotes(days: days, calendar: calendar))
     }
 }

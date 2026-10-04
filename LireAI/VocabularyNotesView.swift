@@ -97,14 +97,25 @@ struct VocabularyNotesView: View {
 private struct NotesImportPreview: View {
     @Environment(\.dismiss) private var dismiss
     let notes: [VocabularyNote]
-    let removedCount: Int
+    @AppStorage("LireAI.VocabularyTool.domain") private var domain = ""
+    @State private var types: [UUID: VocabularyExportType] = [:]
+    @State private var submitting = false
+    @State private var pendingNoteIDs: Set<UUID> = []
+    @State private var pendingCards: [VocabularyExportCard] = []
+    @State private var pendingDomain = ""
+    @State private var showTypeHelp = false
+    @State private var showLogin = false
+    @State private var username = ""
+    @State private var password = ""
+    @State private var loginMessage = "请输入背单词工具的用户名和密码，登录成功后将自动提交。"
+    @State private var resultMessage: String?
+    @State private var succeeded = false
     @State private var selectedIDs: Set<UUID>
 
     init(notes: [VocabularyNote]) {
         let unique = VocabularyNote.unique(notes)
         self.notes = unique
-        removedCount = notes.count - unique.count
-        _selectedIDs = State(initialValue: Set(unique.map(\.id)))
+        _selectedIDs = State(initialValue: Set(unique.filter { $0.submittedAt == nil }.map(\.id)))
     }
     private var days: [Date] {
         Set(notes.map { Calendar.current.startOfDay(for: $0.createdAt) }).sorted(by: >)
@@ -114,28 +125,45 @@ private struct NotesImportPreview: View {
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18) {
-                    Text("已默认选择全部便签，点击卡片可去掉不需要的词义。")
-                        .font(.subheadline).foregroundStyle(NotePaper.ink.opacity(0.65))
-                    if removedCount > 0 {
-                        Text("已合并 \(removedCount) 张重复便签。")
-                            .font(.footnote).foregroundStyle(NotePaper.accent)
+                    HStack {
+                        Text("点击卡片可去掉不需要的词义。")
+                            .font(.subheadline).foregroundStyle(NotePaper.ink.opacity(0.65))
+                        Spacer(minLength: 8)
+                        Button { showTypeHelp = true } label: {
+                            Image(systemName: "info.circle").padding(8)
+                        }
+                        .buttonStyle(.plain).tint(NotePaper.accent)
+                        .accessibilityLabel("Active 和 Passive 说明")
+                        .popover(isPresented: $showTypeHelp) {
+                            Text("Active：正面回忆背面，也从背面回忆正面。\nPassive：只从正面回忆背面。\n一般选择默认的 Active 即可。")
+                                .font(.footnote).foregroundStyle(NotePaper.ink)
+                                .padding(16).frame(idealWidth: 300)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .presentationCompactAdaptation(.popover)
+                        }
                     }
                     ForEach(days, id: \.self) { day in
                         Text(day, format: .dateTime.year().month().day())
                             .font(.system(.headline, design: .serif)).padding(.top, 8)
                         ForEach(notes.filter { Calendar.current.isDate($0.createdAt, inSameDayAs: day) }) { note in
-                            Button {
-                                if !selectedIDs.insert(note.id).inserted { selectedIDs.remove(note.id) }
-                            } label: {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Label(selectedIDs.contains(note.id) ? "已选择" : "未选择",
-                                          systemImage: selectedIDs.contains(note.id) ? "checkmark.circle.fill" : "circle")
-                                        .font(.subheadline).foregroundStyle(NotePaper.accent)
-                                    NoteCardsList(notes: [note]).allowsHitTesting(false)
-                                }.contentShape(Rectangle())
-                            }.buttonStyle(.plain)
-
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Button { toggle(note) } label: {
+                                        Label(selectedIDs.contains(note.id) ? "已选择" : "未选择",
+                                              systemImage: selectedIDs.contains(note.id) ? "checkmark.circle.fill" : "circle")
+                                            .font(.subheadline).foregroundStyle(NotePaper.accent)
+                                    }.buttonStyle(.plain)
+                                    Spacer(minLength: 8)
+                                    Picker("词汇类型", selection: Binding(get: { types[note.id] ?? .active }, set: { types[note.id] = $0 })) {
+                                        ForEach(VocabularyExportType.allCases) { Text($0.rawValue).tag($0) }
+                                    }.pickerStyle(.segmented).frame(width: 170)
+                                }
+                                Button { toggle(note) } label: {
+                                    NoteCardsList(notes: [note], showSubmissionStatus: true).allowsHitTesting(false).contentShape(Rectangle())
+                                }.buttonStyle(.plain)
+                            }
                         }
+
                     }
                 }.padding(22)
             }
@@ -151,21 +179,79 @@ private struct NotesImportPreview: View {
                 ToolbarItem(placement: .topBarTrailing) { Button("完成") { dismiss() }.tint(NotePaper.accent) }
             }
             .safeAreaInset(edge: .bottom) {
-                VStack(spacing: 8) {
-                    if let payload = try? VocabularyNote.importPayload(selected), !selected.isEmpty {
-                        ShareLink(item: payload) {
-                            Text("导出已选便签（\(selected.count) 张）")
-                                .font(.headline).frame(maxWidth: .infinity).padding(14)
-                        }.buttonStyle(.borderedProminent).tint(NotePaper.accent)
-                    } else {
-                        Text("请选择需要导出的便签").font(.subheadline)
-                    }
-                    Text("发送接口尚未配置，目前可分享便签数据。")
-                        .font(.caption).foregroundStyle(.secondary)
-                }.padding().background(NotePaper.background)
+                Button { beginSubmit() } label: {
+                    HStack {
+                        if submitting { ProgressView().tint(.white) }
+                        Text(submitting ? "正在提交…" : "提交已选便签（\(selected.count) 张）")
+                    }.font(.headline).frame(maxWidth: .infinity).padding(14)
+                }.buttonStyle(.borderedProminent).tint(NotePaper.accent)
+                    .disabled(selected.isEmpty || submitting).padding().background(NotePaper.background)
             }
+            .disabled(submitting)
+            .interactiveDismissDisabled(submitting)
+            .alert("登录背单词工具", isPresented: $showLogin) {
+                TextField("用户名", text: $username).textInputAutocapitalization(.never).autocorrectionDisabled()
+                SecureField("密码", text: $password)
+                Button("取消", role: .cancel) { password = ""; pendingCards = []; pendingNoteIDs = [] }
+                Button("登录并提交") { loginAndSubmit() }
+                    .disabled(username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || password.isEmpty)
+            } message: { Text(loginMessage) }
+            .alert(succeeded ? "提交成功" : "无法提交", isPresented: Binding(get: { resultMessage != nil }, set: { if !$0 { resultMessage = nil } })) {
+                Button("好") { resultMessage = nil; if succeeded { dismiss() } }
+            } message: { Text(resultMessage ?? "") }
+
         }.preferredColorScheme(.light)
     }
+    private func toggle(_ note: VocabularyNote) {
+        if !selectedIDs.insert(note.id).inserted { selectedIDs.remove(note.id) }
+    }
+    private func beginSubmit() {
+        pendingNoteIDs = Set(selected.map(\.id))
+        pendingCards = selected.map { VocabularyExportCard(front: $0.front, back: $0.back, type: types[$0.id] ?? .active) }
+        pendingDomain = domain
+        submitting = true
+        succeeded = false
+        Task { await uploadPending() }
+    }
+    private func uploadPending() async {
+        defer { submitting = false }
+        do {
+            let count = try await VocabularyToolClient.shared.submit(domain: pendingDomain, cards: pendingCards)
+            VocabularyNotesStore.shared.markSubmitted(pendingNoteIDs)
+            succeeded = true
+            resultMessage = "已提交 \(count) 张便签，可在背单词工具中查看。"
+            if VocabularyNotesStore.shared.storageError != nil {
+                resultMessage = "已提交 \(count) 张便签，但本地提交时间尚未保存，请返回便签列表重试保存。"
+            }
+            pendingCards = []
+            pendingNoteIDs = []
+        } catch VocabularyToolError.loginRequired {
+            password = ""
+            loginMessage = "请输入背单词工具的用户名和密码，登录成功后将自动提交。"
+            showLogin = true
+        } catch {
+            resultMessage = error.localizedDescription
+        }
+    }
+    private func loginAndSubmit() {
+        let credentials = (username, password)
+        password = ""
+        submitting = true
+        Task {
+            do {
+                try await VocabularyToolClient.shared.login(domain: pendingDomain, username: credentials.0, password: credentials.1)
+                await uploadPending()
+            } catch VocabularyToolError.credentials {
+                submitting = false
+                loginMessage = VocabularyToolError.credentials.localizedDescription
+                showLogin = true
+            } catch {
+                submitting = false
+                resultMessage = error.localizedDescription
+            }
+        }
+    }
+
 }
 
 private struct NotesDayView: View {
@@ -182,12 +268,21 @@ private struct NotesDayView: View {
 
 private struct NoteCardsList: View {
     let notes: [VocabularyNote]
+    var showSubmissionStatus = false
     var body: some View {
         LazyVStack(alignment: .leading, spacing: 18) {
             if notes.isEmpty { NotesEmptyState() }
             ForEach(notes) { note in
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("正面").font(.caption.weight(.medium)).foregroundStyle(NotePaper.accent)
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("正面").font(.caption.weight(.medium)).foregroundStyle(NotePaper.accent)
+                        Spacer(minLength: 8)
+                        if showSubmissionStatus, let date = note.submittedAt {
+                            Text("已提交 " + date.formatted(.dateTime.year().month().day().hour().minute()))
+                                .font(.caption2).foregroundStyle(NotePaper.ink.opacity(0.55))
+                                .lineLimit(1).minimumScaleFactor(0.8)
+                        }
+                    }
                     Text(note.front).font(ReadingTypography.swiftUIFont(size: 25)).textSelection(.enabled)
                     Rectangle().fill(NotePaper.accent.opacity(0.18)).frame(height: 1)
                     Text("背面").font(.caption.weight(.medium)).foregroundStyle(NotePaper.accent)

@@ -9,6 +9,7 @@ struct VocabularyNote: Codable, Identifiable, Equatable {
     let front: String
     let partOfSpeech: String
     let meanings: [String]
+    var submittedAt: Date? = nil
     var back: String { [partOfSpeech, meanings.joined(separator: "；")].filter { !$0.isEmpty }.joined(separator: " ") }
 
     private struct DuplicateKey: Hashable {
@@ -32,15 +33,6 @@ struct VocabularyNote: Codable, Identifiable, Equatable {
         var seen = Set(existing.map(\.duplicateKey))
         return candidates.filter { seen.insert($0.duplicateKey).inserted }
     }
-    static func importPayload(_ notes: [VocabularyNote]) throws -> String {
-        struct Card: Encodable { let front: String; let back: String }
-        struct Payload: Encodable { let cards: [Card] }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let cards = unique(notes).map { Card(front: $0.front, back: $0.back) }
-        return String(decoding: try encoder.encode(Payload(cards: cards)), as: UTF8.self)
-    }
-
     static func extract(from answer: LireAnswer, requestID: UUID, bookID: UUID,
                         bookTitle: String, date: Date = Date()) -> [VocabularyNote] {
         answer.displayedBlocks.flatMap { block -> [VocabularyNote] in

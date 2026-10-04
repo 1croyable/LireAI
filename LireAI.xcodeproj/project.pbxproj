@@ -42,6 +42,7 @@
 		C1F843450FF5663BC9F22118 /* LireCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7CA76191D3D3F2B5C111CB4 /* LireCore.swift */; };
 		C7205E0D83533398694D6A2E /* LireSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC330E5F0A895E6C82E0A9AE /* LireSource.swift */; };
 		C55C50437B96CC513AAFB255 /* VocabularyNote.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9C1BF2E701310F01F8B2805 /* VocabularyNote.swift */; };
+		D40000000000000000000002 /* VocabularyToolClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D40000000000000000000001 /* VocabularyToolClient.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -78,6 +79,7 @@
 		C7CA76191D3D3F2B5C111CB4 /* LireCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LireCore.swift"; sourceTree = "<group>"; };
 		CC330E5F0A895E6C82E0A9AE /* LireSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LireSource.swift"; sourceTree = "<group>"; };
 		C9C1BF2E701310F01F8B2805 /* VocabularyNote.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "VocabularyNote.swift"; sourceTree = "<group>"; };
+		D40000000000000000000001 /* VocabularyToolClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VocabularyToolClient.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 
@@ -166,6 +168,7 @@
 				C8785C940CE3973DEC763662 /* FrenchPartOfSpeech.swift */,
 				C020A933076A71788A82C6FF /* LireAnswer.swift */,
 				C7CA76191D3D3F2B5C111CB4 /* LireCore.swift */,
+				D40000000000000000000001 /* VocabularyToolClient.swift */,
 				CC330E5F0A895E6C82E0A9AE /* LireSource.swift */,
 				C9C1BF2E701310F01F8B2805 /* VocabularyNote.swift */,
 			);
@@ -274,6 +277,7 @@
 				C1BFCFF89CA20D8F1DF38EDF /* FrenchPartOfSpeech.swift in Sources */,
 				C5CF373F7584D30B92AB40DC /* LireAnswer.swift in Sources */,
 				C1F843450FF5663BC9F22118 /* LireCore.swift in Sources */,
+				D40000000000000000000002 /* VocabularyToolClient.swift in Sources */,
 				C7205E0D83533398694D6A2E /* LireSource.swift in Sources */,
 				C55C50437B96CC513AAFB255 /* VocabularyNote.swift in Sources */,
 			);

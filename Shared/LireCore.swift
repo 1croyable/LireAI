@@ -447,7 +447,7 @@ struct LireClient {
         guard let http = response as? HTTPURLResponse else { throw LireError.invalidResponse }
         guard (200...299).contains(http.statusCode) else {
             let explanation = http.statusCode == 503
-                ? "\(connection.provider.title) 服务暂时不可用（HTTP 503）。\(connection.provider == .gemini ? "有限重试后仍失败。" : "")请稍后重试或选择其他模型。"
+                ? "\(connection.provider.title) 服务暂时不可用（HTTP 503）。请稍后重试或选择其他模型。"
                 : "\(connection.provider.title) 请求失败（HTTP \(http.statusCode)）。"
             throw LireError.server(explanation + (serverMessage(from: data).map { "\n" + $0 } ?? ""))
         }
@@ -462,7 +462,7 @@ struct LireClient {
     }
 
     private static func compatibleResponse(_ request: URLRequest, provider: AIProvider) async throws -> (Data, URLResponse) {
-        try await AIHTTPRetry.send(request, using: conversationSession, retryUnavailable: provider == .gemini)
+        try await AIHTTPRetry.send(request, using: conversationSession, retryUnavailable: false, retryGroqErrors: provider == .groq)
     }
 
     private static func performRequest(
