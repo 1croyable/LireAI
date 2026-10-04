@@ -5,6 +5,7 @@ import UIKit
 struct PagePreview {
     let locator: Locator
     let image: UIImage
+    var pageNumber: Int? = nil
 }
 
 @MainActor
@@ -34,6 +35,7 @@ final class BookLayoutIndexer {
     private struct ArchivedPage {
         let locator: Locator
         let url: URL
+        let pageNumber: Int?
         let write: Task<Int?, Never>
     }
     private var archiveDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("LireAI-Pages-" + UUID().uuidString)
@@ -358,7 +360,7 @@ final class BookLayoutIndexer {
                 return data.count
             } catch { return nil }
         }
-        archive[key] = ArchivedPage(locator: page.locator, url: url, write: write)
+        archive[key] = ArchivedPage(locator: page.locator, url: url, pageNumber: page.pageNumber, write: write)
         archiveOrder.append(key)
         Task { [weak self] in
             guard let bytes = await write.value, let self,
@@ -391,7 +393,7 @@ final class BookLayoutIndexer {
             if let image, !Task.isCancelled {
                 archiveOrder.removeAll { $0 == key }
                 archiveOrder.append(key)
-                let page = PagePreview(locator: saved.locator, image: image)
+                let page = PagePreview(locator: saved.locator, image: image, pageNumber: saved.pageNumber)
                 remember(page, from: origin, forward: forward)
                 return page
             }
@@ -447,10 +449,10 @@ final class BookLayoutIndexer {
             }
         }
         guard !Task.isCancelled, await navigate(to: target), !Task.isCancelled,
-              let image = await capture(at: target) else { return nil }
+              let captured = await capture(at: target) else { return nil }
         let bookmark = await bookmark(for: target)
         guard !Task.isCancelled else { return nil }
-        return PagePreview(locator: bookmark, image: image)
+        return PagePreview(locator: bookmark, image: captured.image, pageNumber: captured.pageNumber)
     }
 
     private func bookmark(for page: Locator) async -> Locator {
@@ -608,17 +610,18 @@ final class BookLayoutIndexer {
         return (page.intValue, total.intValue)
     }
 
-    private func capture(at locator: Locator) async -> UIImage? {
+    private func capture(at locator: Locator) async -> PagePreview? {
         for _ in 0..<16 {
             guard !Task.isCancelled, !closed else { return nil }
             let expectsVisibleContent = await RenderedPageLocation.hasVisiblePageContent(navigator)
             let expectsVisibleText = await RenderedPageLocation.hasVisiblePageText(navigator)
+            let number = globalPage(for: locator)?.current
             if let image = await RenderedPageLocation.snapshot(
                 navigator,
                 at: locator,
                 paper: capturePaperColor,
                 afterScreenUpdates: true,
-                pageNumber: globalPage(for: locator)?.current,
+                pageNumber: number,
                 folioColor: captureTextColor.withAlphaComponent(0.58),
                 safeBottom: navigator.view.window?.safeAreaInsets.bottom
             ) {
@@ -626,7 +629,7 @@ final class BookLayoutIndexer {
                     && (!expectsVisibleText || RenderedPageLocation.hasVisibleInk(
                         image, paper: capturePaperColor, minimumContrast: 250
                     )) {
-                    return image
+                    return PagePreview(locator: locator, image: image, pageNumber: number)
                 }
             }
             try? await Task.sleep(for: .milliseconds(40))

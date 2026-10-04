@@ -8,6 +8,23 @@ import WebKit
 enum ReaderPageDecoration {
     /// Draw the folio directly into a page bitmap so it behaves like ink on
     /// paper during the Metal curl (front, fold and mirrored back side).
+    static func addingFolio(to image: UIImage, pageNumber: Int, safeBottom: CGFloat,
+                            paper: UIColor, color: UIColor) -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = image.scale
+        format.opaque = true
+        format.preferredRange = .standard
+        return UIGraphicsImageRenderer(size: image.size, format: format).image { context in
+            image.draw(at: .zero)
+            paper.setFill()
+            context.fill(CGRect(x: max(0, image.size.width - 68),
+                                y: max(0, image.size.height - safeBottom - 44),
+                                width: 60, height: 34))
+            drawFolio(pageNumber: pageNumber, in: context, size: image.size,
+                      safeBottom: safeBottom, color: color)
+        }
+    }
+
     static func drawFolio(
         pageNumber: Int,
         in context: UIGraphicsImageRendererContext,
@@ -296,6 +313,7 @@ final class PageTurnCoordinator: NSObject, UIGestureRecognizerDelegate {
         let locator: Locator
         let image: UIImage
         let size: CGSize
+        var pageNumber: Int? = nil
     }
 
     private struct PageCache {
@@ -448,22 +466,23 @@ final class PageTurnCoordinator: NSObject, UIGestureRecognizerDelegate {
               let preview = (forward ? cache.next.first : cache.previous.first) else { return }
         guard let current = cache.current, current.size == container.bounds.size,
               samePage(current.locator, locator) else { requestPreviews(locator); return }
-        let image = current.image
+        let page = pageWithFolio(current)
+        let target = pageWithFolio(preview)
+        let image = page.image
         if renderer == nil {
             renderer = PageCurlMetalView(curlFrame: container.bounds)
             renderer?.setPaperColor(paperColor)
             renderer?.warmUp(scale: container.window?.screen.scale ?? container.traitCollection.displayScale)
         }
         guard let renderer,
-              let curl = PageCurlOverlay(current: image, target: preview.image,
+              let curl = PageCurlOverlay(current: image, target: target.image,
                                          direction: forward ? .forward : .backward,
                                          frame: container.bounds, metalView: renderer) else {
             didFail("翻页动画暂时无法加载，请再试一次。")
             return
         }
-        let page = PageSnapshot(locator: locator, image: image, size: container.bounds.size)
         origin = page
-        destination = preview
+        destination = target
         cache.current = page
         self.forward = forward
         finishRequested = nil
@@ -476,6 +495,15 @@ final class PageTurnCoordinator: NSObject, UIGestureRecognizerDelegate {
         curl.setInitialTouchY(initialY)
         renderer.draw()
         stateChanged(true)
+    }
+
+    private func pageWithFolio(_ page: PageSnapshot) -> PageSnapshot {
+        guard let number = pageNumberForLocator(page.locator), page.pageNumber != number else { return page }
+        let image = ReaderPageDecoration.addingFolio(
+            to: page.image, pageNumber: number,
+            safeBottom: container?.window?.safeAreaInsets.bottom ?? 0,
+            paper: paperColor, color: inkColor.withAlphaComponent(0.58))
+        return PageSnapshot(locator: page.locator, image: image, size: page.size, pageNumber: number)
     }
 
     private func settledLocation(restoring expected: Locator) async -> Locator? {
@@ -497,16 +525,18 @@ final class PageTurnCoordinator: NSObject, UIGestureRecognizerDelegate {
         return lhs.locations.position == rhs.locations.position
     }
 
-    private func capture(at locator: Locator) async -> UIImage? {
-        await RenderedPageLocation.snapshot(
+    private func capture(at locator: Locator) async -> (image: UIImage, pageNumber: Int?)? {
+        let number = pageNumberForLocator(locator)
+        guard let image = await RenderedPageLocation.snapshot(
             navigator,
             at: locator,
             paper: paperColor,
             afterScreenUpdates: true,
-            pageNumber: pageNumberForLocator(locator),
+            pageNumber: number,
             folioColor: inkColor.withAlphaComponent(0.58),
             safeBottom: container?.window?.safeAreaInsets.bottom
-        )
+        ) else { return nil }
+        return (image, number)
     }
 
     private func finishTurn() {
@@ -584,8 +614,8 @@ final class PageTurnCoordinator: NSObject, UIGestureRecognizerDelegate {
     func setPreviews(for locator: Locator, previous: [PagePreview], next: [PagePreview]) {
         guard !closed, let container else { return }
         let size = container.bounds.size
-        let previousPages = previous.map { PageSnapshot(locator: $0.locator, image: $0.image, size: size) }
-        let nextPages = next.map { PageSnapshot(locator: $0.locator, image: $0.image, size: size) }
+        let previousPages = previous.map { PageSnapshot(locator: $0.locator, image: $0.image, size: size, pageNumber: $0.pageNumber) }
+        let nextPages = next.map { PageSnapshot(locator: $0.locator, image: $0.image, size: size, pageNumber: $0.pageNumber) }
         if isActive, let origin, samePage(origin.locator, locator) {
             cache.current = origin
             cache.previous = mergePreviews(previousPages, with: cache.previous)
@@ -725,8 +755,9 @@ final class PageTurnCoordinator: NSObject, UIGestureRecognizerDelegate {
                 guard generation == cacheGeneration, !Task.isCancelled,
                       !isActive, !persistenceBlocked, !closed else { return false }
                 let expectsVisibleContent = await RenderedPageLocation.hasVisiblePageContent(navigator)
-                guard let image = await capture(at: locator), generation == cacheGeneration,
+                guard let captured = await capture(at: locator), generation == cacheGeneration,
                       navigator.currentSelection == nil, !isActive, !Task.isCancelled else { return false }
+                let image = captured.image
 
                 if expectsVisibleContent,
                    !RenderedPageLocation.hasVisibleInk(image, paper: paperColor) {
@@ -735,7 +766,8 @@ final class PageTurnCoordinator: NSObject, UIGestureRecognizerDelegate {
                     continue
                 }
 
-                cache.current = PageSnapshot(locator: locator, image: image, size: container.bounds.size)
+                cache.current = PageSnapshot(locator: locator, image: image, size: container.bounds.size,
+                                             pageNumber: captured.pageNumber)
                 captureLocation = nil
                 snapshotDidChange(image)
                 preloadNearbyPages()
