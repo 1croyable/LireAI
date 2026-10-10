@@ -627,7 +627,7 @@ final class BookLayoutIndexer {
             ) {
                 if (!expectsVisibleContent || RenderedPageLocation.hasVisibleInk(image, paper: capturePaperColor))
                     && (!expectsVisibleText || RenderedPageLocation.hasVisibleInk(
-                        image, paper: capturePaperColor, minimumContrast: 250
+                        image, paper: capturePaperColor, textColor: captureTextColor
                     )) {
                     return PagePreview(locator: locator, image: image, pageNumber: number)
                 }

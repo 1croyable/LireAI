@@ -8,7 +8,7 @@ private enum APIProviderTab: String, CaseIterable, Identifiable {
 
 struct SettingsView: View {
     @State private var tab: APIProviderTab = .ai
-    @State private var provider: AIProvider = AIKeyStore.activeProvider ?? .mistral
+    @State private var provider: AIProvider = AIKeyStore.activeProvider ?? .gemini
     @State private var slotIDs: [String] = []
     @State private var activeProvider: AIProvider?
     @State private var activeID: String?
@@ -47,9 +47,15 @@ struct SettingsView: View {
                         Button(refreshing ? "获取中…" : "获取模型目录") { Task { await fetchModels() } }
                             .disabled(refreshing || !slotIDs.contains(where: { AIKeyStore.load(provider: provider, id: $0) != nil }))
                     } header: { Text("模型") } footer: {
-                        Text(slotIDs.contains(where: { AIKeyStore.load(provider: provider, id: $0) != nil })
+                        if provider == .openrouter {
+                            Text("获取模型会筛选 Nemotron 3 Super、GPT-OSS-120B、Nemotron 3 Ultra 中当前可用的免费版本。免费版本仍有请求额度，已下线的版本不会自动切换为付费版。")
+                        } else if provider == .gemini {
+                            Text("使用 Google AI Studio 的 Gemini API Key。保存后获取模型并设为当前使用；默认使用 Gemini 3.8 Flash，额度以该账户为准。")
+                        } else {
+                            Text(slotIDs.contains(where: { AIKeyStore.load(provider: provider, id: $0) != nil })
                              ? "模型目录不代表免费额度或生成权限；以该 Key 的账户权限与计费规则为准。"
                              : "先保存此服务商的 API Key，再获取模型目录。")
+                        }
                     }
                     ForEach(Array(slotIDs.enumerated()), id: \.element) { index, id in
                         APIKeySlotSection(provider: provider, id: id, number: index + 1,
@@ -70,7 +76,7 @@ struct SettingsView: View {
                 }
                 Section("使用说明") {
                     Text("选中文字后点击“AI 查找”：词汇显示卡片，句段直接翻译。")
-                    Text("在解释页继续提问，可自然讨论并查看相关词汇卡。")
+                    Text("在解释页继续提问可自然讨论；想了解词义时，AI 会按需要给出词汇卡。")
                     Text("各服务商可以保存多个 Key，全局只使用一个。")
                     Text("Brave Search 负责讨论时需要的联网查询。")
                 }
@@ -103,6 +109,13 @@ struct SettingsView: View {
             let found = try await AIModelCatalog.fetch(provider: selectedProvider, key: key)
             guard provider == selectedProvider else { return }
             models = found
+            if found.isEmpty {
+                error = selectedProvider == .openrouter
+                    ? "这三个候选模型目前没有可用的免费版本，请稍后刷新或选择其他服务商。"
+                    : "没有获取到可用的文本模型。"
+            } else if selectedProvider == .openrouter, !found.contains(model) {
+                model = found.contains(selectedProvider.defaultModel) ? selectedProvider.defaultModel : found[0]
+            }
         } catch { self.error = error.localizedDescription }
     }
 }

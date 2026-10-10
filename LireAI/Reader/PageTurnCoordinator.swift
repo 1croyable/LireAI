@@ -88,7 +88,8 @@ enum RenderedPageLocation {
 
         var candidates: [(web: WKWebView, frame: CGRect)] = []
         func visit(_ child: UIView) {
-            guard !child.isHidden, child.alpha > 0 else { return }
+            guard !child.isHidden, child.alpha >= 0.999,
+                  (child.layer.presentation()?.opacity ?? Float(child.alpha)) >= 0.999 else { return }
             if let web = child as? WKWebView {
                 let frame = web.convert(web.bounds, to: view)
                 if frame.intersects(view.bounds), web.window != nil { candidates.append((web, frame)) }
@@ -145,6 +146,14 @@ enum RenderedPageLocation {
         config.afterScreenUpdates = afterScreenUpdates
         guard let content = try? await selected.web.takeSnapshot(configuration: config),
               !Task.isCancelled else { return nil }
+        // A load/reflow may start while WebKit is taking the snapshot.
+        var ancestor: UIView? = selected.web
+        while let child = ancestor {
+            guard !child.isHidden, child.alpha >= 0.999,
+                  (child.layer.presentation()?.opacity ?? Float(child.alpha)) >= 0.999 else { return nil }
+            if child === view { break }
+            ancestor = child.superview
+        }
 
         let format = UIGraphicsImageRendererFormat()
         format.scale = view.window?.screen.scale ?? 3
@@ -208,13 +217,23 @@ enum RenderedPageLocation {
     /// Fast visual sanity check for the live page bitmap. The test samples only
     /// the reading area (not the native title/folio labels) and needs just a few
     /// non-paper pixels to accept a sparse chapter/title page.
-    static func hasVisibleInk(_ image: UIImage, paper: UIColor, minimumContrast: Int = 72) -> Bool {
+    static func hasVisibleInk(_ image: UIImage, paper: UIColor, minimumContrast: Int = 72,
+                              textColor: UIColor? = nil) -> Bool {
         guard let source = image.cgImage else { return false }
         var pr: CGFloat = 0, pg: CGFloat = 0, pb: CGFloat = 0, pa: CGFloat = 0
         guard paper.getRed(&pr, green: &pg, blue: &pb, alpha: &pa) else { return true }
 
-        let width = 72
-        let height = 112
+        var expectedInk: (Int, Int, Int)?
+        if let textColor {
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            if textColor.getRed(&r, green: &g, blue: &b, alpha: &a) {
+                expectedInk = (Int((r * 255).rounded()), Int((g * 255).rounded()), Int((b * 255).rounded()))
+            }
+        }
+        // Coarse downsampling can make normal text look grey.
+        let scale = min(1, min(512.0 / Double(source.width), 1024.0 / Double(source.height)))
+        let width = expectedInk == nil ? 72 : max(1, Int(Double(source.width) * scale))
+        let height = expectedInk == nil ? 112 : max(1, Int(Double(source.height) * scale))
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
         guard let context = CGContext(
             data: &pixels,
@@ -225,7 +244,7 @@ enum RenderedPageLocation {
             space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return true }
-        context.interpolationQuality = .low
+        context.interpolationQuality = expectedInk == nil ? .low : .none
         context.draw(source, in: CGRect(x: 0, y: 0, width: width, height: height))
 
         let paperR = Int((pr * 255).rounded())
@@ -244,10 +263,18 @@ enum RenderedPageLocation {
                     + abs(Int(pixels[offset + 1]) - paperG)
                     + abs(Int(pixels[offset + 2]) - paperB)
                 sampled += 1
-                if delta > minimumContrast { changed += 1 }
+                let matchesInk = expectedInk.map { ink in
+                    abs(Int(pixels[offset]) - ink.0) <= 24
+                        && abs(Int(pixels[offset + 1]) - ink.1) <= 24
+                        && abs(Int(pixels[offset + 2]) - ink.2) <= 24
+                } ?? true
+                if delta > minimumContrast && matchesInk {
+                    changed += 1
+                    if expectedInk != nil, changed >= 6 { return true }
+                }
             }
         }
-        return changed >= max(6, sampled / 1200)
+        return changed >= (expectedInk == nil ? max(6, sampled / 1200) : 6)
     }
 
     static func hasVisiblePageText(_ navigator: EPUBNavigatorViewController) async -> Bool {
@@ -352,8 +379,8 @@ final class PageTurnCoordinator: NSObject, UIGestureRecognizerDelegate {
     private var finishing = false
     private var closed = false
     private var selectionActive = false
+    private var panTouchBeganAt: TimeInterval = 0
     private var discardCacheAfterTurn = false
-    private let configuredScrollViews = NSHashTable<UIScrollView>.weakObjects()
     private(set) var isActive = false
     var persistenceBlocked: Bool { isSynchronizing || !settledCover.isHidden }
     var currentSnapshotImage: UIImage? { cache.current?.image }
@@ -393,9 +420,12 @@ final class PageTurnCoordinator: NSObject, UIGestureRecognizerDelegate {
 
     func refreshGesturePriority() {
         func visit(_ view: UIView) {
-            if let webView = view as? WKWebView { webView.scrollView.isScrollEnabled = false }
             if let scroll = view as? UIScrollView {
-                if !configuredScrollViews.contains(scroll) { scroll.panGestureRecognizer.require(toFail: turnPan); configuredScrollViews.add(scroll) }
+                // Selection handles can auto-scroll ancestor containers without a pan.
+                scroll.isScrollEnabled = false
+                scroll.bounces = false
+                scroll.alwaysBounceHorizontal = false
+                scroll.alwaysBounceVertical = false
                 scroll.panGestureRecognizer.isEnabled = false
             }
             view.subviews.forEach(visit)
@@ -409,11 +439,16 @@ final class PageTurnCoordinator: NSObject, UIGestureRecognizerDelegate {
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if gestureRecognizer === turnPan { panTouchBeganAt = touch.timestamp }
         return !closed
     }
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         if navigator.currentSelection == nil { selectionActive = false }
+        // Reserve held touches for selection before Readium reports it.
+        if gestureRecognizer === turnPan, ProcessInfo.processInfo.systemUptime - panTouchBeganAt >= 0.35 {
+            return false
+        }
         guard !closed, !isActive, !selectionActive, navigator.currentSelection == nil,
               let locator = cache.current?.locator ?? navigator.currentLocation,
               let pan = gestureRecognizer as? UIPanGestureRecognizer, let container else { return false }
@@ -576,6 +611,7 @@ final class PageTurnCoordinator: NSObject, UIGestureRecognizerDelegate {
                     didFail("正文仍在加载，请稍后再试。")
                     return
                 }
+                refreshGesturePriority()
                 settledCover.isHidden = true
                 settledCover.image = nil
                 return
@@ -755,12 +791,15 @@ final class PageTurnCoordinator: NSObject, UIGestureRecognizerDelegate {
                 guard generation == cacheGeneration, !Task.isCancelled,
                       !isActive, !persistenceBlocked, !closed else { return false }
                 let expectsVisibleContent = await RenderedPageLocation.hasVisiblePageContent(navigator)
+                let expectsVisibleText = await RenderedPageLocation.hasVisiblePageText(navigator)
                 guard let captured = await capture(at: locator), generation == cacheGeneration,
                       navigator.currentSelection == nil, !isActive, !Task.isCancelled else { return false }
                 let image = captured.image
 
-                if expectsVisibleContent,
-                   !RenderedPageLocation.hasVisibleInk(image, paper: paperColor) {
+                if (expectsVisibleContent && !RenderedPageLocation.hasVisibleInk(image, paper: paperColor))
+                    || (expectsVisibleText && !RenderedPageLocation.hasVisibleInk(
+                        image, paper: paperColor, textColor: inkColor
+                    )) {
                     stablePaintSamples = 0
                     try? await Task.sleep(for: .milliseconds(45))
                     continue

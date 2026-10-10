@@ -7,6 +7,11 @@ struct VocabularyExportCard: Codable, Equatable {
     let type: VocabularyExportType
 }
 
+private struct VocabularyImport: Encodable {
+    let source = "LireAI"
+    let words: [VocabularyExportCard]
+}
+
 enum VocabularyExportType: String, Codable, CaseIterable, Identifiable {
     case active, passive
     var id: String { rawValue }
@@ -133,7 +138,7 @@ final class VocabularyToolClient {
             return !front.isEmpty && front.utf16.count <= 255 && !$0.back.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }) else { throw VocabularyToolError.invalidCards }
         guard let token = try tokenStorage.load(for: base.absoluteString) else { throw VocabularyToolError.loginRequired }
-        let body = try JSONEncoder().encode(cards)
+        let body = try JSONEncoder().encode(VocabularyImport(words: cards))
         let (data, status) = try await post(base.appendingPathComponent("notes/import"), body: body, token: token)
         if status == 401 || status == 403 {
             try tokenStorage.remove(for: base.absoluteString)

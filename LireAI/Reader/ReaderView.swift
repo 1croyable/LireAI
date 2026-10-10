@@ -3,6 +3,7 @@ import ReadiumShared
 import SwiftUI
 import UIKit
 import Combine
+import WebKit
 
 enum ReaderThemeMode: String, CaseIterable {
     case warm
@@ -417,7 +418,6 @@ final class ReaderHost: UIViewController, EPUBNavigatorDelegate {
             pageTurns?.updatePaperColor(currentTheme.paperColor, textColor: currentTheme.textColor)
             indexer?.setAppearance(paper: currentTheme.paperColor, text: currentTheme.textColor)
             if let locator = navigator.currentLocation { indexer?.request(for: locator) }
-            installSelectionPageLock()
             updateRenderedPageNumber()
             markReaderReadyWhenStable()
         }
@@ -741,7 +741,6 @@ final class ReaderHost: UIViewController, EPUBNavigatorDelegate {
     private func commitLocation(_ locator: Locator) {
         guard !isClosed, lastLocator != locator else { return }
         lastLocator = locator
-        installSelectionPageLock()
         session.position = locator.locations.position
         library.update(book, locator: locator, positionCount: session.positionCount)
         updateRenderedPageNumber()
@@ -755,9 +754,13 @@ final class ReaderHost: UIViewController, EPUBNavigatorDelegate {
         commitLocation(locator)
     }
 
-    /// Keeps WebKit selection handles from scrolling away from the current column.
-    private func installSelectionPageLock() {
-        let script = """
+    func navigator(_ navigator: EPUBNavigatorViewController, setupUserScripts userContentController: WKUserContentController) {
+        userContentController.addUserScript(WKUserScript(
+            source: Self.selectionPageLockScript, injectionTime: .atDocumentStart, forMainFrameOnly: false
+        ))
+    }
+
+    static let selectionPageLockScript = """
         (() => {
           if (window.__lireSelectionPageLock) return true;
           const pageX = () => {
@@ -770,31 +773,71 @@ final class ReaderHost: UIViewController, EPUBNavigatorDelegate {
           };
           let stableX = pageX();
           let lockedX = null;
-          document.addEventListener('selectionchange', () => {
+          let touching = false;
+          let rootStyle = null;
+          const restore = () => {
+            if (lockedX !== null && Math.abs(window.scrollX - lockedX) > 0.5) {
+              window.scrollTo({ left: lockedX, top: window.scrollY, behavior: 'instant' });
+            }
+          };
+          const syncSelection = () => {
             if (hasSelection()) {
-              if (lockedX === null) lockedX = stableX;
-            } else {
+              if (lockedX === null) {
+                lockedX = stableX;
+                const root = document.scrollingElement;
+                if (root) {
+                  rootStyle = ['overflow-x', 'overscroll-behavior-x', 'scroll-behavior'].map(name =>
+                    [name, root.style.getPropertyValue(name), root.style.getPropertyPriority(name)]);
+                  root.style.setProperty('overflow-x', 'hidden', 'important');
+                  root.style.setProperty('overscroll-behavior-x', 'none', 'important');
+                  root.style.setProperty('scroll-behavior', 'auto', 'important');
+                }
+              }
+              restore();
+            } else if (!touching) {
+              // A dragged handle can briefly collapse the selection.
+              restore();
               lockedX = null;
+              const root = document.scrollingElement;
+              if (root && rootStyle) {
+                rootStyle.forEach(([name, value, priority]) => {
+                  if (value) root.style.setProperty(name, value, priority);
+                  else root.style.removeProperty(name);
+                });
+              }
+              rootStyle = null;
               stableX = pageX();
             }
+          };
+          document.addEventListener('touchstart', () => {
+            touching = true;
+            if (lockedX === null && !hasSelection()) stableX = pageX();
+          }, { capture: true, passive: true });
+          const endTouch = event => {
+            touching = event.touches.length > 0;
+            if (!touching) requestAnimationFrame(syncSelection);
+          };
+          document.addEventListener('touchend', endTouch, { capture: true, passive: true });
+          document.addEventListener('touchcancel', endTouch, { capture: true, passive: true });
+          document.addEventListener('selectionchange', () => {
+            syncSelection();
           }, true);
-          window.addEventListener('scroll', () => {
-            if (!hasSelection()) {
-              lockedX = null;
+          window.addEventListener('scroll', event => {
+            if (lockedX === null && hasSelection()) syncSelection();
+            if (lockedX !== null) {
+              if (Math.abs(window.scrollX - lockedX) > 0.5) {
+                // Do not let Readium persist a transient half-page position.
+                event.stopImmediatePropagation();
+                restore();
+              }
+            } else {
               stableX = pageX();
-            } else if (lockedX !== null && Math.abs(window.scrollX - lockedX) > 1) {
-              window.scrollTo(lockedX, window.scrollY);
             }
-          }, { passive: true });
+          }, { capture: true, passive: true });
           window.__lireSelectionPageLock = true;
           return true;
         })()
         """
-        Task { [weak self] in
-            guard let self, !isClosed else { return }
-            _ = await navigator.evaluateJavaScript(script)
-        }
-    }
 
     /// Derives displayed pages from painted WebKit columns after layout changes.
     private func updateRenderedPageNumber() {

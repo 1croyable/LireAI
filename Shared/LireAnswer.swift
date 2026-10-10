@@ -262,7 +262,8 @@ struct LireAnswer: Decodable, Identifiable {
                        "LATEST_REQUEST_BEGIN", "WEB_CONTEXT_BEGIN"]
         guard !markers.contains(where: conversationText.contains) else { return false }
         if selectionKind == "lookup" {
-            if type == "translation" { return true }
+            guard blocks?.isEmpty != false else { return false }
+            if type == "translation" { return core == nil }
             return type == "vocabulary" && Self.hasText(core?.display)
         }
         if selectionKind == "translation" { return type == "translation" }
@@ -291,19 +292,81 @@ struct LireAnswer: Decodable, Identifiable {
     }
 
     static let cardFormatInstructions = """
+    Create a vocabulary object for a confidently identified lexical entry the user is asking about, including a brief word-focused request whose intent is understood from context. Keep the selected spelling in display for a lookup. lemma is the dictionary headword appropriate to the intended lexical meaning in context, not merely a related root or historical source. It can be identical to display: a form with its own independent meaning need not be changed just because it resembles an inflected or derived form. Use your linguistic judgment to choose the entry. Each sense's part_of_speech, meanings, definition and example must describe that lemma consistently, because lemma and the sense become the front and back of a saved vocabulary note. Use morphology for relevant form information and usage_note for contextual usage when helpful. If different lexical entries would be needed, do not mix their senses under one lemma. If the entry, lemma or sense is uncertain, state the uncertainty instead of guessing required fields.
     A vocabulary object has type="vocabulary", core={display,lemma,morphology,senses}, optional context_note, extras and tags. display and lemma are strings; lemma contains only the dictionary expression, never a part of speech. morphology is optional and contains inflection information only, never a part of speech. Each sense has part_of_speech (French abbreviation: n.f., n.m., adj., adv., v., loc., etc.), translations_zh (array of Chinese meanings for that sense), definition_fr, example_fr, example_zh (strings), optional collocations (array of strings) and usage_note (string). extras, if used, is an array of objects with title and content. No lists or bullets inside field strings. Optional supplements belong to their respective sense when possible and may be omitted. Write explanatory notes (usage_note, context_note and extras prose) in Simplified Chinese; collocations remain in French.
     Common part_of_speech labels include, but are not limited to: n.m. (masculine noun), n.f. (feminine noun), n. (noun), adj. (adjective), adv. (adverb), v. (verb), v.tr. (transitive verb), v.intr. (intransitive verb), v.pron. (pronominal verb), loc. (expression), pron. (pronoun), prép. (preposition), conj. (conjunction), interj. (interjection).
     """
 
     static let lookupFormatInstructions = """
-    Return a single JSON object, no code fences or prose.
-    Vocabulary: type="vocabulary" with the card fields below.
-    Translation: type="translation", translation=the full Chinese translation. No other content.
+    Return a single JSON object, no code fences or surrounding prose. The top-level type field is required.
+    For a standalone French word or fixed expression: type="vocabulary" with one card using the fields below.
+    For a sentence, clause or passage: type="translation", translation=the complete Chinese translation. No vocabulary cards, blocks, discussion or translation note. If the selection cannot be identified or translated reliably, use this translation field for a brief statement of uncertainty rather than inventing a lexical entry.
     """ + "\n" + cardFormatInstructions
 
     static let formatInstructions = """
     Return only a JSON object with type="response" and blocks (ordered array).
-    Each block is either type="markdown" with text, or a vocabulary object with the card fields below. Use separate cards for independent French expressions. Prose and cards can occur in any order; opening and closing prose are optional. Do not output code fences.
+    Each block is either type="markdown" with text, or a vocabulary object with the card fields below. Every block requires its own type field. Cards are optional; a brief question focused on a French word or expression can itself convey a request for its meaning. Understand that intent in context rather than requiring explicit wording. Mere relevance to a broader discussion is insufficient. Use only markdown blocks for ordinary discussion. When presenting a card, emit the vocabulary block itself instead of merely announcing it in prose. Use separate cards for requested independent lexical entries. Prose and cards can occur in any order; opening and closing prose are optional. Do not output code fences.
     """ + "\n" + cardFormatInstructions
 
+}
+
+enum LireJSONContract {
+    case searchDecision, lookup, discussion
+
+    var responseFormat: [String: Any] {
+        ["type": "json_schema", "json_schema": [
+            "name": name, "strict": true, "schema": schema
+        ]]
+    }
+
+    private var name: String {
+        switch self {
+        case .searchDecision: "search_decision"
+        case .lookup: "quoted_lookup"
+        case .discussion: "reading_discussion"
+        }
+    }
+
+    private static func object(_ properties: [String: Any]) -> [String: Any] {
+        ["type": "object", "properties": properties,
+         "required": properties.keys.sorted(), "additionalProperties": false]
+    }
+
+    private static func nullable(_ schema: [String: Any]) -> [String: Any] {
+        ["anyOf": [schema, ["type": "null"]]]
+    }
+
+    private var schema: [String: Any] {
+        let string: [String: Any] = ["type": "string"]
+        let strings: [String: Any] = ["type": "array", "items": string]
+        if self == .searchDecision {
+            return Self.object(["needs_search": ["type": "boolean"], "query": Self.nullable(string)])
+        }
+        let sense = Self.object([
+            "part_of_speech": string, "translations_zh": strings,
+            "definition_fr": string, "example_fr": string, "example_zh": string,
+            "collocations": Self.nullable(strings), "usage_note": Self.nullable(string)
+        ])
+        let core = Self.object([
+            "display": string, "lemma": string, "morphology": Self.nullable(string),
+            "senses": ["type": "array", "items": sense]
+        ])
+        let extras: [String: Any] = ["type": "array", "items": Self.object(["title": string, "content": string])]
+        let vocabulary = Self.object([
+            "type": ["type": "string", "enum": ["vocabulary"]], "core": core,
+            "context_note": Self.nullable(string), "extras": Self.nullable(extras), "tags": Self.nullable(strings)
+        ])
+        if self == .lookup {
+            return Self.object([
+                "type": ["type": "string", "enum": ["vocabulary", "translation"]],
+                "translation": Self.nullable(string), "core": Self.nullable(core),
+                "context_note": Self.nullable(string), "extras": Self.nullable(extras)
+            ])
+        }
+        let markdown = Self.object(["type": ["type": "string", "enum": ["markdown"]], "text": string])
+        return Self.object([
+            "type": ["type": "string", "enum": ["response"]],
+            "blocks": ["type": "array", "items": ["anyOf": [markdown, vocabulary]]]
+        ])
+    }
 }
